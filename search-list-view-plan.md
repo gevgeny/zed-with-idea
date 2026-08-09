@@ -32,21 +32,20 @@ Original estimate for B assumed reusing `TextFinder`'s `Picker`, which is modal-
 
 ## Status
 
-**Done** — toolbar toggle button (`IconName::ListTree`, left of the filter button) and `list_view_enabled` on `ProjectSearchView`. List mode currently renders a placeholder.
+**Done — A through E (except opening a match).** Toolbar toggle, flat `matches` list on `ProjectSearch`, virtualized `uniform_list`, scrollbar, selection with `up`/`down` and click.
 
-The toggle also moves focus to the view's own handle. That is not cosmetic — see the focus rule in `agents.custom.md`. Removing it reintroduces a frame-rate repaint loop that flickers the tab header.
+The `on_focus` handler in `ProjectSearchView::new` forwards focus to the results editor one frame after the view is focused. It is guarded on `list_view_enabled`. **Removing that guard breaks list view twice over**: arrow keys silently drive the results editor, and if the editor is also unmounted, a frame-rate repaint loop flickers the tab header. See `agents.custom.md`.
 
 `LIST_VIEW_VERSION` is surfaced in the toggle's tooltip so a running build can be identified while iterating. Remove before merging.
 
 ## Remaining steps
 
-Each is one build, independently testable.
-
-- **B** — static `v_flex` of the first N rows, real match text. No virtualization. Requires `matches: Vec<SearchMatch>` on `ProjectSearch`, populated in `consume_search_stream` and cleared alongside `match_ranges`.
-- **C** — swap to `uniform_list`, no scroll handle.
-- **D** — add `track_scroll` + `UniformListScrollHandle`.
-- **E** — selection state, up/down via `menu::SelectNext`/`SelectPrevious`, `scroll_to_item`.
+- **E (rest)** — `enter` opens the selected match. Undecided: open in place of the search tab, or in a new tab (matching today's `alt-enter` / `OpenExcerpts`).
 - **F** — preview pane: second `Entity<Editor>` over a singleton buffer from `project.open_buffer`, scrolled to the selected match. Do **not** reuse the results multibuffer — its scroll coupling is the thing being escaped. `picker_preview` is an existing crate worth reading first.
+
+## Performance
+
+Not yet measured in release. Scrolling ~2k matches feels slow in a debug build. Suspects, in order: the debug build itself; `render_matched_line` taking a buffer snapshot and running tree-sitter per visible row per frame (`text_finder` does the same, so it is at least idiomatic). Measure with `cargo run --release` before optimizing anything.
 
 ## Open questions
 

@@ -2,17 +2,20 @@
 
 Rules earned from real debugging sessions. Traps to avoid, not architecture notes.
 
-## Keep a focusable child view mounted; do not swap it out of the element tree
+## Before adding a view mode, find every handler that forwards focus
 
-Adding a view mode that renders something *else* where a focusable child view used to be leaves that child alive but unrendered, and its focus handle outside the tree.
+A view whose own focus handle is a pass-through — an `on_focus` handler that hands focus to a child editor — cannot host a second mode without disabling that handler for the new mode. `ProjectSearchView` does exactly this: focusing the view forwards to the results editor on the next frame.
 
-`Pane::focus_in` restores `last_focus_handle_by_item` for its active item, and `Window::focus` accepts any handle without checking that it is rendered. So focus is set to a handle that no element owns, the frame's focus path comes out empty, focus-lost fires, the pane restores the same handle again — a frame-rate loop. gpui documents this shape at `crates/gpui/src/window.rs` in `draw`, but only guards the focus-listener case.
+Two failures follow, and they look unrelated:
 
-**Moving focus elsewhere before the swap does not fix it.** The pane's stored handle is keyed by item and outlives the focus change; it gets restored on the next focus event regardless. There is currently no public API to ask gpui whether a handle is still in the tree, so a view cannot defend itself.
+- **A repaint loop.** If the new mode removes the child from the element tree, the forwarder focuses a handle no element owns. The frame's focus path comes out empty, focus-lost fires, the handler runs again next frame. gpui documents this shape in `Window::draw` but guards only its own focus-listener case. The visible symptom is unrelated chrome flickering — toolbar items, status bar, breadcrumbs — because they are downstream of the pane's focus broadcast, while the view actually changed looks fine.
+- **Dead keybindings.** If the new mode keeps the child mounted, focus lands on the child instead, so a key context added for the new mode never wins. Arrow keys silently drive the hidden child.
 
-Render the alternate mode *over* the existing child (absolute + `occlude`) instead of replacing it. The cost is one hidden child's layout per repaint.
+Both are one cause. Guard the forwarder on the mode flag; do not try to out-focus it by calling `focus` again, because it runs a frame later and always wins.
 
-Symptoms point away from the cause: unrelated chrome (toolbar items, status bar items, breadcrumbs) flickers, because it is downstream of the pane's focus broadcast, while the view actually changed looks fine. It also only reproduces once the removed view has held focus — click into it first, then switch modes, or the loop never starts. That intermittency makes single manual observations worthless as evidence; confirm with a counter, not with one look.
+`Pane::focus_in` also restores `last_focus_handle_by_item`, so it is a plausible second suspect — but do not stop there. In this case it was a bystander, and blaming it cost two wrong "fixes".
+
+This only reproduces once the child has held focus: click into it first, then switch modes. That intermittency makes single manual observations worthless as evidence; confirm with a counter, not with one look.
 
 ## Diagnose repaint loops by escalating instrumentation, never by reading
 

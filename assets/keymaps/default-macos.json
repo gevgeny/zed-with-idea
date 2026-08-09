@@ -523,6 +523,14 @@
     },
   },
   {
+    "context": "ProjectSearchListView",
+    "use_key_equivalents": true,
+    "bindings": {
+      "down": "menu::SelectNext",
+      "up": "menu::SelectPrevious",
+    },
+  },
+  {
     "context": "ProjectSearchView",
     "use_key_equivalents": true,
     "bindings": {
