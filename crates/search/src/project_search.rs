@@ -8,7 +8,10 @@ use crate::{
         ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
         render_action_button, render_text_input, should_navigate_history,
     },
-    text_finder::TextFinder,
+    text_finder::{
+        SearchMatch, TextFinder,
+        delegate::{Delegate, render_matched_line},
+    },
 };
 use anyhow::Context as _;
 use collections::HashMap;
@@ -24,8 +27,8 @@ use futures::{StreamExt, stream::FuturesOrdered};
 use gpui::{
     Action, AnyElement, App, AsyncApp, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, Global, Hsla, InteractiveElement, IntoElement, KeyContext, ParentElement, Point,
-    Render, SharedString, Styled, Subscription, Task, TaskExt, UpdateGlobal, WeakEntity, Window,
-    actions, div,
+    Rems, Render, SharedString, Stateful, Styled, Subscription, Task, TaskExt, UpdateGlobal,
+    WeakEntity, Window, actions, div, rems,
 };
 use itertools::Itertools;
 use language::{Buffer, Language};
@@ -242,6 +245,10 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+/// Bumped on every change to the search list view, and surfaced in the list view button's
+/// tooltip so a running build can be identified at a glance.
+const LIST_VIEW_VERSION: &str = "0.1.p19";
+
 fn contains_uppercase(str: &str) -> bool {
     str.chars().any(|c| c.is_uppercase())
 }
@@ -251,6 +258,9 @@ pub struct ProjectSearch {
     pub excerpts: Entity<MultiBuffer>,
     pub pending_search: Option<Task<Option<SearchResults<SearchResult>>>>,
     pub match_ranges: Vec<Range<Anchor>>,
+    /// Flat, per-match view of the same results `match_ranges` describes, for the list view,
+    /// which renders one row per match rather than one excerpt per file.
+    pub matches: Vec<SearchMatch>,
     pub(crate) active_query: Option<SearchQuery>,
     last_search_query_text: Option<String>,
     pub search_id: usize,
@@ -315,6 +325,7 @@ pub struct ProjectSearchView {
     included_files_editor: Entity<Editor>,
     excluded_files_editor: Entity<Editor>,
     filters_enabled: bool,
+    list_view_enabled: bool,
     replace_enabled: bool,
     pending_replace_all: bool,
     included_opened_only: bool,
@@ -344,6 +355,7 @@ impl ProjectSearch {
             excerpts,
             pending_search: Default::default(),
             match_ranges: Default::default(),
+            matches: Default::default(),
             active_query: None,
             last_search_query_text: None,
             search_id: 0,
@@ -368,6 +380,7 @@ impl ProjectSearch {
                 excerpts,
                 pending_search: Default::default(),
                 match_ranges: self.match_ranges.clone(),
+                matches: self.matches.clone(),
                 active_query: self.active_query.clone(),
                 last_search_query_text: self.last_search_query_text.clone(),
                 search_id: self.search_id,
@@ -466,11 +479,13 @@ impl ProjectSearch {
         self.search_id += 1;
         self.active_query = Some(query);
         self.match_ranges.clear();
+        self.matches.clear();
         self.search_state = SearchState::Running(SearchActivity::Searching);
         self.pending_search = Some(cx.spawn(async move |project_search, cx| {
             project_search
                 .update(cx, |project_search, cx| {
                     project_search.match_ranges.clear();
+                    project_search.matches.clear();
                     project_search
                         .excerpts
                         .update(cx, |excerpts, cx| excerpts.clear(cx));
@@ -557,6 +572,16 @@ async fn consume_search_stream(
                 })
                 .ok()?;
         }
+        let new_matches = buffers_with_ranges
+            .iter()
+            .flat_map(|(buffer, ranges)| Delegate::process_search_result(buffer, ranges, cx))
+            .collect::<Vec<_>>();
+        project_search
+            .update(cx, |project_search, _| {
+                project_search.matches.extend(new_matches);
+            })
+            .ok()?;
+
         let mut new_ranges = project_search
             .update(cx, |project_search, cx| {
                 project_search.excerpts.update(cx, |excerpts, cx| {
@@ -622,6 +647,73 @@ pub enum ViewEvent {
     Dismiss,
 }
 
+/// Rows rendered by the list view before virtualization exists. Keeps a large result set from
+/// building tens of thousands of elements every frame.
+const MAX_LIST_VIEW_ROWS: usize = 100;
+
+impl ProjectSearchView {
+    fn render_match_list(&self, cx: &App) -> Stateful<Div> {
+        let matches = &self.entity.read(cx).matches;
+        let widest_line_number = matches
+            .iter()
+            .take(MAX_LIST_VIEW_ROWS)
+            .map(|search_match| search_match.line_number)
+            .max()
+            .unwrap_or(1)
+            .max(1);
+        let line_number_width = rems((widest_line_number.ilog10() + 1) as f32 * 0.5);
+
+        v_flex()
+            .id("project-search-match-list")
+            .size_full()
+            .overflow_y_scroll()
+            .bg(cx.theme().colors().editor_background)
+            .children(
+                matches
+                    .iter()
+                    .take(MAX_LIST_VIEW_ROWS)
+                    .map(|search_match| render_match_row(search_match, line_number_width, cx)),
+            )
+    }
+}
+
+fn render_match_row(search_match: &SearchMatch, line_number_width: Rems, cx: &App) -> AnyElement {
+    let file_name = search_match
+        .path
+        .path
+        .file_name()
+        .map(|name| name.to_string())
+        .unwrap_or_default();
+
+    h_flex()
+        .w_full()
+        .min_w_0()
+        .px_2()
+        .py_0p5()
+        .gap_2()
+        .text_sm()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(render_matched_line(search_match, cx)),
+        )
+        .child(
+            h_flex()
+                .flex_none()
+                .gap_1()
+                .child(Label::new(file_name).color(Color::Muted))
+                .child(
+                    div().w(line_number_width).child(
+                        Label::new(search_match.line_number.to_string())
+                            .color(Color::Custom(cx.theme().colors().text_muted.opacity(0.5))),
+                    ),
+                ),
+        )
+        .into_any_element()
+}
+
 impl EventEmitter<ViewEvent> for ProjectSearchView {}
 
 impl Render for ProjectSearchView {
@@ -630,13 +722,38 @@ impl Render for ProjectSearchView {
         key_context.add("ProjectSearchView");
 
         if self.has_matches() {
-            div()
+            let container = div()
                 .key_context(key_context)
                 .on_action(cx.listener(Self::open_text_finder))
                 .flex_1()
                 .size_full()
-                .track_focus(&self.focus_handle(cx))
-                .child(self.results_editor.clone())
+                .track_focus(&self.focus_handle(cx));
+
+            if self.list_view_enabled {
+                // The results editor stays mounted, covered by the list rather than replaced by
+                // it. Taking it out of the element tree leaves the pane holding a focus handle
+                // that can never take focus (`Pane::focus_in` restores
+                // `last_focus_handle_by_item`), so focus is lost and restored every frame. See
+                // agents.custom.md. Fixing that properly needs a way to ask gpui whether a
+                // handle is still in the tree, which it does not currently expose.
+                container
+                    .relative()
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .child(self.results_editor.clone()),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .inset_0()
+                            .occlude()
+                            .child(self.render_match_list(cx)),
+                    )
+            } else {
+                container.child(self.results_editor.clone())
+            }
         } else {
             let model = self.entity.read(cx);
 
@@ -1193,6 +1310,7 @@ impl ProjectSearchView {
             included_files_editor,
             excluded_files_editor,
             filters_enabled,
+            list_view_enabled: false,
             replace_enabled: false,
             pending_replace_all: false,
             included_opened_only: false,
@@ -1752,8 +1870,21 @@ impl ProjectSearchView {
                 s.select_ranges([cursor..cursor])
             });
         });
-        let results_handle = self.results_editor.focus_handle(cx);
+        // List view takes the results editor out of the element tree. A focus handle that is
+        // not rendered can never take focus, so the pane keeps retrying every frame; focus the
+        // view itself, which owns the list. See agents.custom.md.
+        let results_handle = if self.list_view_enabled {
+            self.focus_handle.clone()
+        } else {
+            self.results_editor.focus_handle(cx)
+        };
         window.focus(&results_handle, cx);
+    }
+
+    fn toggle_list_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.list_view_enabled = !self.list_view_enabled;
+        self.focus_results_editor(window, cx);
+        cx.notify();
     }
 
     fn entity_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2466,6 +2597,25 @@ impl Render for ProjectSearchBar {
         let mode_column = h_flex()
             .gap_1()
             .min_w_64()
+            .child(
+                IconButton::new("project-search-list-view-button", IconName::ListTree)
+                    .shape(IconButtonShape::Square)
+                    .tooltip(Tooltip::text(format!("Toggle List View ({LIST_VIEW_VERSION})")))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(search_view) = this.active_project_search.as_ref() {
+                            search_view.update(cx, |search_view, cx| {
+                                search_view.toggle_list_view(window, cx);
+                            });
+                            cx.notify();
+                        }
+                    }))
+                    .toggle_state(
+                        self.active_project_search
+                            .as_ref()
+                            .map(|search| search.read(cx).list_view_enabled)
+                            .unwrap_or_default(),
+                    ),
+            )
             .child(
                 IconButton::new("project-search-filter-button", IconName::Filter)
                     .shape(IconButtonShape::Square)

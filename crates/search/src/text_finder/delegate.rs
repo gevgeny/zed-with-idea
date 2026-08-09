@@ -1312,7 +1312,7 @@ fn matched_line_window(
 
 /// Renders the matched source line with syntax highlighting, overlaying the
 /// search match with a highlighted background and bold weight.
-fn render_matched_line(search_match: &SearchMatch, cx: &App) -> StyledText {
+pub(crate) fn render_matched_line(search_match: &SearchMatch, cx: &App) -> StyledText {
     let settings = ThemeSettings::get_global(cx);
     let text_style = TextStyle {
         color: cx.theme().colors().text,
