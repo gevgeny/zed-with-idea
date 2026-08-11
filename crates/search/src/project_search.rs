@@ -1472,18 +1472,7 @@ impl ProjectSearchView {
         let focus_handle = cx.focus_handle();
         subscriptions.push(cx.on_focus(&focus_handle, window, |_, window, cx| {
             cx.on_next_frame(window, |this, window, cx| {
-                // List view is driven from the view's own focus handle, so it must keep focus
-                // rather than hand it to the results editor.
-                if this.list_view_enabled {
-                    return;
-                }
-                if this.focus_handle.is_focused(window) {
-                    if this.has_matches() {
-                        this.results_editor.focus_handle(cx).focus(window, cx);
-                    } else {
-                        this.query_editor.focus_handle(cx).focus(window, cx);
-                    }
-                }
+                this.forward_focus_to_input(window, cx);
             });
         }));
 
@@ -2077,6 +2066,20 @@ impl ProjectSearchView {
             editor.set_text(text, window, cx);
             editor.request_autoscroll(Autoscroll::fit(), cx);
         });
+    }
+
+    /// The view's own focus handle is a pass-through: receiving focus hands it to whichever
+    /// input should really have it. List view is the exception, since it is driven from that
+    /// handle and has to keep it.
+    fn forward_focus_to_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.list_view_enabled || !self.focus_handle.is_focused(window) {
+            return;
+        }
+        if self.has_matches() {
+            self.results_editor.focus_handle(cx).focus(window, cx);
+        } else {
+            self.query_editor.focus_handle(cx).focus(window, cx);
+        }
     }
 
     fn focus_results_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -5414,6 +5417,73 @@ pub mod tests {
                 assert_eq!(
                     search_view.selected_match_index, 0,
                     "selecting down from the last row wraps to the first"
+                );
+            })
+            .expect("unable to update search view");
+    }
+
+    /// `ProjectSearchView::new` installs an `on_focus` handler that forwards focus to the
+    /// results editor, and `focus_results_editor` targets that editor directly. Both are
+    /// guarded on `list_view_enabled`, because list view is driven from the view's own focus
+    /// handle. Drop either guard and the arrow keys silently drive the results editor instead
+    /// of the list.
+    #[gpui::test]
+    async fn test_list_view_keeps_focus(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.background_executor.clone());
+        fs.insert_tree(
+            path!("/dir"),
+            json!({
+                "one.rs": "const A: u8 = 0;\n",
+            }),
+        )
+        .await;
+        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
+        let window =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
+        let workspace = window
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+        let search = cx.new(|cx| ProjectSearch::new(project, cx));
+        let search_view = cx.add_window(|window, cx| {
+            ProjectSearchView::new(workspace.downgrade(), search.clone(), window, cx, None)
+        });
+
+        perform_search(search_view, "const A", cx);
+
+        search_view
+            .update(cx, |search_view, window, cx| {
+                search_view.toggle_list_view(window, cx);
+                assert!(search_view.list_view_enabled);
+            })
+            .expect("unable to update search view");
+
+        cx.run_until_parked();
+
+        search_view
+            .update(cx, |search_view, window, cx| {
+                // Every path that focuses the results view routes through here, so it has to
+                // resolve to the view's own handle while the list is showing.
+                search_view.focus_results_editor(window, cx);
+                assert!(
+                    search_view.focus_handle.is_focused(window),
+                    "focusing the results view in list view must keep focus on the view itself"
+                );
+
+                // What the `on_focus` handler runs a frame after the view takes focus. Called
+                // directly because a test window is never drawn, so `on_next_frame` never
+                // fires.
+                search_view.forward_focus_to_input(window, cx);
+                assert!(
+                    search_view.focus_handle.is_focused(window),
+                    "list view must keep focus rather than forward it to the results editor"
+                );
+                assert!(
+                    !search_view
+                        .results_editor
+                        .focus_handle(cx)
+                        .is_focused(window),
                 );
             })
             .expect("unable to update search view");
