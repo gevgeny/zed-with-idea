@@ -38,10 +38,22 @@ The `on_focus` handler in `ProjectSearchView::new` forwards focus to the results
 
 `LIST_VIEW_VERSION` is surfaced in the toggle's tooltip so a running build can be identified while iterating. Remove before merging.
 
+**F is done too.** The preview reuses `picker_preview` rather than a hand-built editor: `SearchMatch` already carries exactly the fields `MatchLocation` wants, and `PreviewSource::Buffer` exists for callers that already hold the buffer.
+
+`picker_preview` was written for modal pickers, where the preview is deliberately inert — one big click target for sending the match to a multibuffer. Three separate things enforced that, and a preview in a persistent pane needs all three relaxed:
+
+1. `set_forbid_vertical_scroll(true)` in the constructor
+2. a full-size `.occlude()` overlay in `occluded_editor`, which swallows every mouse event
+3. `scroll_to_focus_match` re-locking vertical scroll on *every* update, undoing (1)
+
+`scrollable_editor_preview()` opts out of all three. `editor_preview()` is unchanged, so existing pickers keep their behavior.
+
 ## Remaining steps
 
-- **E (rest)** — `enter` opens the selected match. Undecided: open in place of the search tab, or in a new tab (matching today's `alt-enter` / `OpenExcerpts`).
-- **F** — preview pane: second `Entity<Editor>` over a singleton buffer from `project.open_buffer`, scrolled to the selected match. Do **not** reuse the results multibuffer — its scroll coupling is the thing being escaped. `picker_preview` is an existing crate worth reading first.
+- **Open at the match.** Double-click opens the file at the top, not at the matched line. Downcast the opened item to `Editor` and select the match range.
+- **`enter` to open.** Undecided: replace the search tab, or open a new tab (matching today's `alt-enter` / `OpenExcerpts`).
+- **Persist the split.** `list_view_split` resets each session; persisting needs workspace serialization.
+- **Persist the mode.** Whether list view is on is not remembered either, and there is no setting for the default.
 
 ## Performance
 

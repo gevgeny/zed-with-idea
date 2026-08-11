@@ -27,12 +27,14 @@ use futures::{StreamExt, stream::FuturesOrdered};
 use gpui::{
     Action, AnyElement, App, AsyncApp, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, Global, Hsla, InteractiveElement, IntoElement, KeyContext, ParentElement, Point,
-    Rems, Render, ScrollStrategy, SharedString, Styled, Subscription, Task, TaskExt,
-    UniformListScrollHandle, UpdateGlobal, WeakEntity, Window, actions, div, rems, uniform_list,
+    ClickEvent, Div, DragMoveEvent, Pixels, Rems, Render, ScrollStrategy, SharedString, Stateful,
+    Styled, Subscription, Task, TaskExt, UniformListScrollHandle, UpdateGlobal, WeakEntity, Window,
+    actions, div, px, rems, uniform_list,
 };
 use itertools::Itertools;
 use language::{Buffer, Language};
 use menu::{Confirm, SelectNext, SelectPrevious};
+use picker::{MatchLocation, PreviewBackend, PreviewLayout, PreviewSource, PreviewUpdate};
 use multi_buffer;
 use project::{
     Project, ProjectPath, SearchResults,
@@ -247,7 +249,24 @@ pub fn init(cx: &mut App) {
 
 /// Bumped on every change to the search list view, and surfaced in the list view button's
 /// tooltip so a running build can be identified at a glance.
-const LIST_VIEW_VERSION: &str = "0.1.p28";
+const LIST_VIEW_VERSION: &str = "0.1.p33";
+
+/// Grabbable height of the divider between the match list and the preview. The line itself is
+/// the top border; the rest is grab area.
+const LIST_VIEW_DIVIDER_HEIGHT: Pixels = px(5.);
+
+/// Smallest either list view pane can be dragged to.
+const MIN_LIST_VIEW_PANE_HEIGHT: Pixels = px(80.);
+
+/// Marks a drag of the list view divider. Renders nothing: the divider moves, so there is no
+/// dragged item to follow the cursor.
+struct DraggedListViewDivider;
+
+impl Render for DraggedListViewDivider {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
 
 fn contains_uppercase(str: &str) -> bool {
     str.chars().any(|c| c.is_uppercase())
@@ -328,6 +347,9 @@ pub struct ProjectSearchView {
     list_view_enabled: bool,
     list_scroll_handle: UniformListScrollHandle,
     selected_match_index: usize,
+    list_view_preview: Arc<dyn PreviewBackend>,
+    /// Height of the match list in list view. `None` splits the available space evenly.
+    list_view_split: Option<Pixels>,
     replace_enabled: bool,
     pending_replace_all: bool,
     included_opened_only: bool,
@@ -650,24 +672,25 @@ pub enum ViewEvent {
 }
 
 impl ProjectSearchView {
-    fn select_match_row(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select_match_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_match_index = index;
         self.list_scroll_handle
             .scroll_to_item(index, ScrollStrategy::Center);
+        self.update_list_view_preview(window, cx);
         cx.notify();
     }
 
-    fn select_next_match_row(&mut self, _: &SelectNext, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_next_match_row(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
         let match_count = self.entity.read(cx).matches.len();
         if match_count > 0 {
-            self.select_match_row((self.selected_match_index + 1) % match_count, cx);
+            self.select_match_row((self.selected_match_index + 1) % match_count, window, cx);
         }
     }
 
     fn select_previous_match_row(
         &mut self,
         _: &SelectPrevious,
-        _: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let match_count = self.entity.read(cx).matches.len();
@@ -676,8 +699,84 @@ impl ProjectSearchView {
                 .selected_match_index
                 .checked_sub(1)
                 .unwrap_or(match_count - 1);
-            self.select_match_row(previous_index, cx);
+            self.select_match_row(previous_index, window, cx);
         }
+    }
+
+    fn render_list_view_divider(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .id("project-search-list-view-divider")
+            .w_full()
+            .h(LIST_VIEW_DIVIDER_HEIGHT)
+            .flex_none()
+            .border_t_1()
+            .border_color(cx.theme().colors().border)
+            .cursor_row_resize()
+            .occlude()
+            .on_drag(DraggedListViewDivider, |_, _, _, cx| {
+                cx.new(|_| DraggedListViewDivider)
+            })
+            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
+                if event.click_count() >= 2 {
+                    this.list_view_split = None;
+                    cx.notify();
+                }
+            }))
+    }
+
+    fn resize_list_view_split(
+        &mut self,
+        event: &DragMoveEvent<DraggedListViewDivider>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let available = event.bounds.size.height - LIST_VIEW_DIVIDER_HEIGHT;
+        // A pane can always be shrunk to the minimum, even in a window too short to hold two of
+        // them; clamp the upper bound so it never falls below the lower one.
+        let max_height = (available - MIN_LIST_VIEW_PANE_HEIGHT).max(MIN_LIST_VIEW_PANE_HEIGHT);
+        let height = event.event.position.y - event.bounds.origin.y;
+        self.list_view_split = Some(height.clamp(MIN_LIST_VIEW_PANE_HEIGHT, max_height));
+        cx.notify();
+    }
+
+    fn update_list_view_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let update = self
+            .entity
+            .read(cx)
+            .matches
+            .get(self.selected_match_index)
+            .map(|search_match| PreviewUpdate {
+                source: PreviewSource::Buffer(search_match.buffer.clone()),
+                match_location: Some(MatchLocation {
+                    anchor_range: search_match.anchor_range.clone(),
+                    range: search_match.range.clone(),
+                }),
+            });
+
+        match update {
+            Some(update) => self.list_view_preview.update(update, window, cx),
+            None => self.list_view_preview.clear(cx),
+        }
+    }
+
+    fn open_selected_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self
+            .entity
+            .read(cx)
+            .matches
+            .get(self.selected_match_index)
+            .map(|search_match| search_match.path.clone())
+        else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace
+            .update(cx, |workspace, cx| {
+                workspace.open_path(path, None, true, window, cx)
+            })
+            .detach_and_log_err(cx);
     }
 
     fn render_match_list(
@@ -770,11 +869,16 @@ fn render_match_row(
         .when(selected, |this| {
             this.bg(cx.theme().colors().element_selected)
         })
-        .on_click(move |_, window, cx| {
+        .on_click(move |event: &ClickEvent, window, cx| {
+            let opening = event.click_count() >= 2;
             view.update(cx, |view, cx| {
-                view.select_match_row(index, cx);
-                let focus_handle = view.focus_handle.clone();
-                window.focus(&focus_handle, cx);
+                view.select_match_row(index, window, cx);
+                if opening {
+                    view.open_selected_match(window, cx);
+                } else {
+                    let focus_handle = view.focus_handle.clone();
+                    window.focus(&focus_handle, cx);
+                }
             })
             .ok();
         })
@@ -829,9 +933,27 @@ impl Render for ProjectSearchView {
                 .on_action(cx.listener(Self::select_previous_match_row));
 
             if self.list_view_enabled {
-                container
-                    .bg(cx.theme().colors().editor_background)
-                    .child(self.render_match_list(cx.entity().downgrade(), window, cx))
+                let list_pane = div()
+                    .overflow_hidden()
+                    .child(self.render_match_list(cx.entity().downgrade(), window, cx));
+                let list_pane = match self.list_view_split {
+                    Some(height) => list_pane.h(height).flex_none(),
+                    None => list_pane.flex_1(),
+                };
+
+                container.bg(cx.theme().colors().editor_background).child(
+                    v_flex()
+                        .size_full()
+                        .on_drag_move(cx.listener(Self::resize_list_view_split))
+                        .child(list_pane)
+                        .child(self.render_list_view_divider(cx))
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .child(self.list_view_preview.render(PreviewLayout::Below, cx)),
+                        ),
+                )
             } else {
                 container.child(self.results_editor.clone())
             }
@@ -1399,6 +1521,12 @@ impl ProjectSearchView {
             list_view_enabled: false,
             list_scroll_handle: UniformListScrollHandle::new(),
             selected_match_index: 0,
+            list_view_preview: picker_preview::scrollable_editor_preview(
+                project.clone(),
+                window,
+                cx,
+            ),
+            list_view_split: None,
             replace_enabled: false,
             pending_replace_all: false,
             included_opened_only: false,
@@ -1971,6 +2099,9 @@ impl ProjectSearchView {
 
     fn toggle_list_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.list_view_enabled = !self.list_view_enabled;
+        if self.list_view_enabled {
+            self.update_list_view_preview(window, cx);
+        }
         self.focus_results_editor(window, cx);
         cx.notify();
     }
