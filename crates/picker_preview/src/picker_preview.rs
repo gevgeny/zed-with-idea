@@ -24,29 +24,8 @@ pub fn editor_preview(
     cx: &mut App,
 ) -> Arc<dyn PreviewBackend> {
     Arc::new(EditorPreviewHandle(
-        cx.new(|cx| EditorPreview::new(project, Interactivity::Inert, window, cx)),
+        cx.new(|cx| EditorPreview::new(project, window, cx)),
     ))
-}
-
-/// An [`editor_preview`] the user can scroll and select in.
-///
-/// The modal preview is deliberately inert: it is one big click target for sending the match to
-/// a multibuffer. A preview that lives in a persistent pane instead of a modal is something the
-/// user reads, so it keeps its own scrolling and scrollbar.
-pub fn scrollable_editor_preview(
-    project: Entity<Project>,
-    window: &mut Window,
-    cx: &mut App,
-) -> Arc<dyn PreviewBackend> {
-    Arc::new(EditorPreviewHandle(
-        cx.new(|cx| EditorPreview::new(project, Interactivity::Scrollable, window, cx)),
-    ))
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Interactivity {
-    Inert,
-    Scrollable,
 }
 
 struct EditorPreviewHandle(Entity<EditorPreview>);
@@ -81,18 +60,12 @@ struct EditorPreview {
     /// When set show a text message instead of a preview
     message: Option<HighlightedText>,
     preview_editor: Entity<Editor>,
-    interactivity: Interactivity,
     /// Store the load preview task so we have only one at the time
     pending_update: Task<()>,
 }
 
 impl EditorPreview {
-    fn new(
-        project: Entity<Project>,
-        interactivity: Interactivity,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(project: Entity<Project>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let preview_editor = cx.new(|cx: &mut Context<Editor>| {
             let capability = language::Capability::ReadWrite; // Later narrowed per buffer
             let multi_buffer = cx.new(|_| MultiBuffer::without_headers(capability));
@@ -103,10 +76,8 @@ impl EditorPreview {
             // as one big <send to multibuffer> button.
             editor.set_read_only(true);
             editor.set_input_enabled(false);
-            if interactivity == Interactivity::Inert {
-                editor.scroll_manager.set_forbid_vertical_scroll(true);
-                editor.disable_scrollbars_and_minimap(window, cx);
-            }
+            editor.scroll_manager.set_forbid_vertical_scroll(true);
+            editor.disable_scrollbars_and_minimap(window, cx);
             editor.disable_inline_diagnostics();
             editor.disable_diagnostics(cx);
             editor.disable_expand_excerpt_buttons(cx);
@@ -128,7 +99,6 @@ impl EditorPreview {
         let mut this = Self {
             project,
             preview_editor,
-            interactivity,
             current_path: None,
             message: None,
             pending_update: Task::ready(()),
@@ -297,9 +267,6 @@ impl EditorPreview {
     /// Keep the scroll as far left as possible while showing the match.
     /// Vertically center the match as much as possible
     fn scroll_to_focus_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Scrolling to the match needs the lock off; put it back only for previews that are
-        // meant to be inert, or a scrollable preview is re-locked on every update.
-        let forbid_vertical_scroll = self.interactivity == Interactivity::Inert;
         self.preview_editor.update(cx, |editor, cx| {
             let display_snapshot = editor.display_snapshot(cx);
             let buffer_snapshot = display_snapshot.buffer_snapshot();
@@ -332,9 +299,7 @@ impl EditorPreview {
 
             editor.scroll_manager.set_forbid_vertical_scroll(false);
             editor.set_scroll_position(gpui::Point::new(centered_x, centered_y), window, cx);
-            editor
-                .scroll_manager
-                .set_forbid_vertical_scroll(forbid_vertical_scroll);
+            editor.scroll_manager.set_forbid_vertical_scroll(true);
         })
     }
 
@@ -391,22 +356,16 @@ impl EditorPreview {
     }
 
     fn occluded_editor(&self) -> impl IntoElement {
-        // A scrollable preview is read, not clicked through, so it must receive mouse events.
-        // The modal preview covers its editor instead, so a click anywhere in it counts as
-        // picking the entry rather than landing in the editor.
-        let occluded = self.interactivity == Interactivity::Inert;
         div()
             .relative()
             .size_full()
             .child(self.preview_editor.clone())
-            .when(occluded, |this| {
-                this.child(
-                    div()
-                        .id("picker-preview-editor")
-                        .absolute()
-                        .inset_0()
-                        .occlude(),
-                )
-            })
+            .child(
+                div()
+                    .id("picker-preview-editor")
+                    .absolute()
+                    .inset_0()
+                    .occlude(),
+            )
     }
 }

@@ -473,13 +473,6 @@
     },
   },
   {
-    "context": "ProjectSearchListView",
-    "bindings": {
-      "down": "menu::SelectNext",
-      "up": "menu::SelectPrevious",
-    },
-  },
-  {
     "context": "ProjectSearchView",
     "bindings": {
       "escape": "project_search::ToggleFocus",

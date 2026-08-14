@@ -8,10 +8,7 @@ use crate::{
         ActionButtonState, HistoryNavigationDirection, alignment_element, input_base_styles,
         render_action_button, render_text_input, should_navigate_history,
     },
-    text_finder::{
-        SearchMatch, TextFinder,
-        delegate::{Delegate, render_matched_line},
-    },
+    text_finder::TextFinder,
 };
 use anyhow::Context as _;
 use collections::HashMap;
@@ -27,14 +24,12 @@ use futures::{StreamExt, stream::FuturesOrdered};
 use gpui::{
     Action, AnyElement, App, AsyncApp, Context, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, Global, Hsla, InteractiveElement, IntoElement, KeyContext, ParentElement, Point,
-    ClickEvent, Div, DragMoveEvent, Pixels, Rems, Render, ScrollStrategy, SharedString, Stateful,
-    Styled, Subscription, Task, TaskExt, UniformListScrollHandle, UpdateGlobal, WeakEntity, Window,
-    actions, div, px, rems, uniform_list,
+    Render, SharedString, Styled, Subscription, Task, TaskExt, UpdateGlobal, WeakEntity, Window,
+    actions, div,
 };
 use itertools::Itertools;
 use language::{Buffer, Language};
-use menu::{Confirm, SelectNext, SelectPrevious};
-use picker::{MatchLocation, PreviewBackend, PreviewLayout, PreviewSource, PreviewUpdate};
+use menu::Confirm;
 use multi_buffer;
 use project::{
     Project, ProjectPath, SearchResults,
@@ -53,8 +48,8 @@ use std::{
     },
 };
 use ui::{
-    CommonAnimationExt, IconButtonShape, KeyBinding, ScrollAxes, Scrollbars, Toggleable, Tooltip,
-    WithScrollbar, prelude::*, utils::SearchInputWidth,
+    CommonAnimationExt, IconButtonShape, KeyBinding, Toggleable, Tooltip, prelude::*,
+    utils::SearchInputWidth,
 };
 use util::{ResultExt as _, paths::PathMatcher};
 use workspace::{
@@ -247,27 +242,6 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
-/// Bumped on every change to the search list view, and surfaced in the list view button's
-/// tooltip so a running build can be identified at a glance.
-const LIST_VIEW_VERSION: &str = "0.1.p33";
-
-/// Grabbable height of the divider between the match list and the preview. The line itself is
-/// the top border; the rest is grab area.
-const LIST_VIEW_DIVIDER_HEIGHT: Pixels = px(5.);
-
-/// Smallest either list view pane can be dragged to.
-const MIN_LIST_VIEW_PANE_HEIGHT: Pixels = px(80.);
-
-/// Marks a drag of the list view divider. Renders nothing: the divider moves, so there is no
-/// dragged item to follow the cursor.
-struct DraggedListViewDivider;
-
-impl Render for DraggedListViewDivider {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        gpui::Empty
-    }
-}
-
 fn contains_uppercase(str: &str) -> bool {
     str.chars().any(|c| c.is_uppercase())
 }
@@ -277,9 +251,6 @@ pub struct ProjectSearch {
     pub excerpts: Entity<MultiBuffer>,
     pub pending_search: Option<Task<Option<SearchResults<SearchResult>>>>,
     pub match_ranges: Vec<Range<Anchor>>,
-    /// Flat, per-match view of the same results `match_ranges` describes, for the list view,
-    /// which renders one row per match rather than one excerpt per file.
-    pub matches: Vec<SearchMatch>,
     pub(crate) active_query: Option<SearchQuery>,
     last_search_query_text: Option<String>,
     pub search_id: usize,
@@ -344,12 +315,6 @@ pub struct ProjectSearchView {
     included_files_editor: Entity<Editor>,
     excluded_files_editor: Entity<Editor>,
     filters_enabled: bool,
-    list_view_enabled: bool,
-    list_scroll_handle: UniformListScrollHandle,
-    selected_match_index: usize,
-    list_view_preview: Arc<dyn PreviewBackend>,
-    /// Height of the match list in list view. `None` splits the available space evenly.
-    list_view_split: Option<Pixels>,
     replace_enabled: bool,
     pending_replace_all: bool,
     included_opened_only: bool,
@@ -379,7 +344,6 @@ impl ProjectSearch {
             excerpts,
             pending_search: Default::default(),
             match_ranges: Default::default(),
-            matches: Default::default(),
             active_query: None,
             last_search_query_text: None,
             search_id: 0,
@@ -404,7 +368,6 @@ impl ProjectSearch {
                 excerpts,
                 pending_search: Default::default(),
                 match_ranges: self.match_ranges.clone(),
-                matches: self.matches.clone(),
                 active_query: self.active_query.clone(),
                 last_search_query_text: self.last_search_query_text.clone(),
                 search_id: self.search_id,
@@ -503,13 +466,11 @@ impl ProjectSearch {
         self.search_id += 1;
         self.active_query = Some(query);
         self.match_ranges.clear();
-        self.matches.clear();
         self.search_state = SearchState::Running(SearchActivity::Searching);
         self.pending_search = Some(cx.spawn(async move |project_search, cx| {
             project_search
                 .update(cx, |project_search, cx| {
                     project_search.match_ranges.clear();
-                    project_search.matches.clear();
                     project_search
                         .excerpts
                         .update(cx, |excerpts, cx| excerpts.clear(cx));
@@ -596,16 +557,6 @@ async fn consume_search_stream(
                 })
                 .ok()?;
         }
-        let new_matches = buffers_with_ranges
-            .iter()
-            .flat_map(|(buffer, ranges)| Delegate::process_search_result(buffer, ranges, cx))
-            .collect::<Vec<_>>();
-        project_search
-            .update(cx, |project_search, _| {
-                project_search.matches.extend(new_matches);
-            })
-            .ok()?;
-
         let mut new_ranges = project_search
             .update(cx, |project_search, cx| {
                 project_search.excerpts.update(cx, |excerpts, cx| {
@@ -671,292 +622,21 @@ pub enum ViewEvent {
     Dismiss,
 }
 
-impl ProjectSearchView {
-    fn select_match_row(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        self.selected_match_index = index;
-        self.list_scroll_handle
-            .scroll_to_item(index, ScrollStrategy::Center);
-        self.update_list_view_preview(window, cx);
-        cx.notify();
-    }
-
-    fn select_next_match_row(&mut self, _: &SelectNext, window: &mut Window, cx: &mut Context<Self>) {
-        let match_count = self.entity.read(cx).matches.len();
-        if match_count > 0 {
-            self.select_match_row((self.selected_match_index + 1) % match_count, window, cx);
-        }
-    }
-
-    fn select_previous_match_row(
-        &mut self,
-        _: &SelectPrevious,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let match_count = self.entity.read(cx).matches.len();
-        if match_count > 0 {
-            let previous_index = self
-                .selected_match_index
-                .checked_sub(1)
-                .unwrap_or(match_count - 1);
-            self.select_match_row(previous_index, window, cx);
-        }
-    }
-
-    fn render_list_view_divider(&self, cx: &mut Context<Self>) -> Stateful<Div> {
-        div()
-            .id("project-search-list-view-divider")
-            .w_full()
-            .h(LIST_VIEW_DIVIDER_HEIGHT)
-            .flex_none()
-            .border_t_1()
-            .border_color(cx.theme().colors().border)
-            .cursor_row_resize()
-            .occlude()
-            .on_drag(DraggedListViewDivider, |_, _, _, cx| {
-                cx.new(|_| DraggedListViewDivider)
-            })
-            .on_click(cx.listener(|this, event: &ClickEvent, _, cx| {
-                if event.click_count() >= 2 {
-                    this.list_view_split = None;
-                    cx.notify();
-                }
-            }))
-    }
-
-    fn resize_list_view_split(
-        &mut self,
-        event: &DragMoveEvent<DraggedListViewDivider>,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let available = event.bounds.size.height - LIST_VIEW_DIVIDER_HEIGHT;
-        // A pane can always be shrunk to the minimum, even in a window too short to hold two of
-        // them; clamp the upper bound so it never falls below the lower one.
-        let max_height = (available - MIN_LIST_VIEW_PANE_HEIGHT).max(MIN_LIST_VIEW_PANE_HEIGHT);
-        let height = event.event.position.y - event.bounds.origin.y;
-        self.list_view_split = Some(height.clamp(MIN_LIST_VIEW_PANE_HEIGHT, max_height));
-        cx.notify();
-    }
-
-    fn update_list_view_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let update = self
-            .entity
-            .read(cx)
-            .matches
-            .get(self.selected_match_index)
-            .map(|search_match| PreviewUpdate {
-                source: PreviewSource::Buffer(search_match.buffer.clone()),
-                match_location: Some(MatchLocation {
-                    anchor_range: search_match.anchor_range.clone(),
-                    range: search_match.range.clone(),
-                }),
-            });
-
-        match update {
-            Some(update) => self.list_view_preview.update(update, window, cx),
-            None => self.list_view_preview.clear(cx),
-        }
-    }
-
-    fn open_selected_match(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(path) = self
-            .entity
-            .read(cx)
-            .matches
-            .get(self.selected_match_index)
-            .map(|search_match| search_match.path.clone())
-        else {
-            return;
-        };
-        let Some(workspace) = self.workspace.upgrade() else {
-            return;
-        };
-        workspace
-            .update(cx, |workspace, cx| {
-                workspace.open_path(path, None, true, window, cx)
-            })
-            .detach_and_log_err(cx);
-    }
-
-    fn render_match_list(
-        &self,
-        view: WeakEntity<Self>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let matches = &self.entity.read(cx).matches;
-        let match_count = matches.len();
-        let widest_line_number = matches
-            .iter()
-            .map(|search_match| search_match.line_number)
-            .max()
-            .unwrap_or(1)
-            .max(1);
-        let line_number_width = rems((widest_line_number.ilog10() + 1) as f32 * 0.5);
-
-        // Read the matches inside the closure rather than capturing a copy, so a large result
-        // set is not cloned on every render.
-        let entity = self.entity.clone();
-        let selected_match_index = self.selected_match_index;
-        let list = uniform_list(
-            "project-search-match-list",
-            match_count,
-            move |range: Range<usize>, _window, cx: &mut App| {
-                let matches = &entity.read(cx).matches;
-                matches
-                    .get(range.clone())
-                    .unwrap_or_default()
-                    .iter()
-                    .zip(range)
-                    .map(|(search_match, index)| {
-                        render_match_row(
-                            search_match,
-                            index,
-                            index == selected_match_index,
-                            line_number_width,
-                            view.clone(),
-                            cx,
-                        )
-                    })
-                    .collect()
-            },
-        )
-        .track_scroll(&self.list_scroll_handle)
-        .size_full();
-
-        // `WithScrollbar` is not implemented for `UniformList`, so the scrollbar goes on a
-        // wrapping container.
-        v_flex()
-            .size_full()
-            .overflow_hidden()
-            .child(list)
-            .custom_scrollbars(
-                Scrollbars::new(ScrollAxes::Vertical)
-                    .tracked_scroll_handle(&self.list_scroll_handle),
-                window,
-                cx,
-            )
-            .into_any_element()
-    }
-}
-
-fn render_match_row(
-    search_match: &SearchMatch,
-    index: usize,
-    selected: bool,
-    line_number_width: Rems,
-    view: WeakEntity<ProjectSearchView>,
-    cx: &App,
-) -> AnyElement {
-    let file_name = search_match
-        .path
-        .path
-        .file_name()
-        .map(|name| name.to_string())
-        .unwrap_or_default();
-
-    h_flex()
-        .id(("project-search-match-row", index))
-        .w_full()
-        .min_w_0()
-        .px_2()
-        .py_0p5()
-        .gap_2()
-        .text_sm()
-        .cursor_pointer()
-        .hover(|this| this.bg(cx.theme().colors().element_hover))
-        .when(selected, |this| {
-            this.bg(cx.theme().colors().element_selected)
-        })
-        .on_click(move |event: &ClickEvent, window, cx| {
-            let opening = event.click_count() >= 2;
-            view.update(cx, |view, cx| {
-                view.select_match_row(index, window, cx);
-                if opening {
-                    view.open_selected_match(window, cx);
-                } else {
-                    let focus_handle = view.focus_handle.clone();
-                    window.focus(&focus_handle, cx);
-                }
-            })
-            .ok();
-        })
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .child(render_matched_line(search_match, cx)),
-        )
-        .child(
-            h_flex()
-                .flex_none()
-                .gap_1()
-                .child(Label::new(file_name).color(Color::Muted).single_line())
-                .child(
-                    // `min_w` rather than a fixed width: the per-digit estimate is not exact in
-                    // the UI font, and an overflowing number would wrap and make the row taller,
-                    // which breaks `uniform_list`'s uniform row height.
-                    div().min_w(line_number_width).flex_none().child(
-                        Label::new(search_match.line_number.to_string())
-                            .color(Color::Custom(cx.theme().colors().text_muted.opacity(0.5)))
-                            .single_line(),
-                    ),
-                ),
-        )
-        .into_any_element()
-}
-
 impl EventEmitter<ViewEvent> for ProjectSearchView {}
 
 impl Render for ProjectSearchView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut key_context = KeyContext::default();
         key_context.add("ProjectSearchView");
-        // A separate context so list navigation keys only rebind while the list is showing; in
-        // the default view those keys belong to the results editor.
-        if self.list_view_enabled {
-            key_context.add("ProjectSearchListView");
-        }
 
         if self.has_matches() {
-            let container = div()
+            div()
                 .key_context(key_context)
                 .on_action(cx.listener(Self::open_text_finder))
                 .flex_1()
                 .size_full()
-                .track_focus(&self.focus_handle(cx));
-
-            let container = container
-                .on_action(cx.listener(Self::select_next_match_row))
-                .on_action(cx.listener(Self::select_previous_match_row));
-
-            if self.list_view_enabled {
-                let list_pane = div()
-                    .overflow_hidden()
-                    .child(self.render_match_list(cx.entity().downgrade(), window, cx));
-                let list_pane = match self.list_view_split {
-                    Some(height) => list_pane.h(height).flex_none(),
-                    None => list_pane.flex_1(),
-                };
-
-                container.bg(cx.theme().colors().editor_background).child(
-                    v_flex()
-                        .size_full()
-                        .on_drag_move(cx.listener(Self::resize_list_view_split))
-                        .child(list_pane)
-                        .child(self.render_list_view_divider(cx))
-                        .child(
-                            div()
-                                .flex_1()
-                                .overflow_hidden()
-                                .child(self.list_view_preview.render(PreviewLayout::Below, cx)),
-                        ),
-                )
-            } else {
-                container.child(self.results_editor.clone())
-            }
+                .track_focus(&self.focus_handle(cx))
+                .child(self.results_editor.clone())
         } else {
             let model = self.entity.read(cx);
 
@@ -1472,7 +1152,13 @@ impl ProjectSearchView {
         let focus_handle = cx.focus_handle();
         subscriptions.push(cx.on_focus(&focus_handle, window, |_, window, cx| {
             cx.on_next_frame(window, |this, window, cx| {
-                this.forward_focus_to_input(window, cx);
+                if this.focus_handle.is_focused(window) {
+                    if this.has_matches() {
+                        this.results_editor.focus_handle(cx).focus(window, cx);
+                    } else {
+                        this.query_editor.focus_handle(cx).focus(window, cx);
+                    }
+                }
             });
         }));
 
@@ -1507,15 +1193,6 @@ impl ProjectSearchView {
             included_files_editor,
             excluded_files_editor,
             filters_enabled,
-            list_view_enabled: false,
-            list_scroll_handle: UniformListScrollHandle::new(),
-            selected_match_index: 0,
-            list_view_preview: picker_preview::scrollable_editor_preview(
-                project.clone(),
-                window,
-                cx,
-            ),
-            list_view_split: None,
             replace_enabled: false,
             pending_replace_all: false,
             included_opened_only: false,
@@ -2068,20 +1745,6 @@ impl ProjectSearchView {
         });
     }
 
-    /// The view's own focus handle is a pass-through: receiving focus hands it to whichever
-    /// input should really have it. List view is the exception, since it is driven from that
-    /// handle and has to keep it.
-    fn forward_focus_to_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.list_view_enabled || !self.focus_handle.is_focused(window) {
-            return;
-        }
-        if self.has_matches() {
-            self.results_editor.focus_handle(cx).focus(window, cx);
-        } else {
-            self.query_editor.focus_handle(cx).focus(window, cx);
-        }
-    }
-
     fn focus_results_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.query_editor.update(cx, |query_editor, cx| {
             let cursor = query_editor.selections.newest_anchor().head();
@@ -2089,24 +1752,8 @@ impl ProjectSearchView {
                 s.select_ranges([cursor..cursor])
             });
         });
-        // List view takes the results editor out of the element tree. A focus handle that is
-        // not rendered can never take focus, so the pane keeps retrying every frame; focus the
-        // view itself, which owns the list. See agents.custom.md.
-        let results_handle = if self.list_view_enabled {
-            self.focus_handle.clone()
-        } else {
-            self.results_editor.focus_handle(cx)
-        };
+        let results_handle = self.results_editor.focus_handle(cx);
         window.focus(&results_handle, cx);
-    }
-
-    fn toggle_list_view(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.list_view_enabled = !self.list_view_enabled;
-        if self.list_view_enabled {
-            self.update_list_view_preview(window, cx);
-        }
-        self.focus_results_editor(window, cx);
-        cx.notify();
     }
 
     fn entity_changed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -2819,25 +2466,6 @@ impl Render for ProjectSearchBar {
         let mode_column = h_flex()
             .gap_1()
             .min_w_64()
-            .child(
-                IconButton::new("project-search-list-view-button", IconName::ListTree)
-                    .shape(IconButtonShape::Square)
-                    .tooltip(Tooltip::text(format!("Toggle List View ({LIST_VIEW_VERSION})")))
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let Some(search_view) = this.active_project_search.as_ref() {
-                            search_view.update(cx, |search_view, cx| {
-                                search_view.toggle_list_view(window, cx);
-                            });
-                            cx.notify();
-                        }
-                    }))
-                    .toggle_state(
-                        self.active_project_search
-                            .as_ref()
-                            .map(|search| search.read(cx).list_view_enabled)
-                            .unwrap_or_default(),
-                    ),
-            )
             .child(
                 IconButton::new("project-search-filter-button", IconName::Filter)
                     .shape(IconButtonShape::Square)
@@ -5370,123 +4998,6 @@ pub mod tests {
                 });
             })
             .unwrap();
-    }
-
-    #[gpui::test]
-    async fn test_match_list_selection_wraps(cx: &mut TestAppContext) {
-        init_test(cx);
-
-        let fs = FakeFs::new(cx.background_executor.clone());
-        fs.insert_tree(
-            path!("/dir"),
-            json!({
-                "one.rs": "const A: u8 = 0;\n",
-                "two.rs": "const A: u8 = 1;\nconst A2: u8 = 2;\n",
-            }),
-        )
-        .await;
-        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
-        let window =
-            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = window
-            .read_with(cx, |mw, _| mw.workspace().clone())
-            .unwrap();
-        let search = cx.new(|cx| ProjectSearch::new(project, cx));
-        let search_view = cx.add_window(|window, cx| {
-            ProjectSearchView::new(workspace.downgrade(), search.clone(), window, cx, None)
-        });
-
-        perform_search(search_view, "const A", cx);
-
-        search_view
-            .update(cx, |search_view, window, cx| {
-                assert_eq!(
-                    search_view.entity.read(cx).matches.len(),
-                    3,
-                    "every match should get its own list row"
-                );
-                assert_eq!(search_view.selected_match_index, 0);
-
-                search_view.select_previous_match_row(&SelectPrevious, window, cx);
-                assert_eq!(
-                    search_view.selected_match_index, 2,
-                    "selecting up from the first row wraps to the last"
-                );
-
-                search_view.select_next_match_row(&SelectNext, window, cx);
-                assert_eq!(
-                    search_view.selected_match_index, 0,
-                    "selecting down from the last row wraps to the first"
-                );
-            })
-            .expect("unable to update search view");
-    }
-
-    /// `ProjectSearchView::new` installs an `on_focus` handler that forwards focus to the
-    /// results editor, and `focus_results_editor` targets that editor directly. Both are
-    /// guarded on `list_view_enabled`, because list view is driven from the view's own focus
-    /// handle. Drop either guard and the arrow keys silently drive the results editor instead
-    /// of the list.
-    #[gpui::test]
-    async fn test_list_view_keeps_focus(cx: &mut TestAppContext) {
-        init_test(cx);
-
-        let fs = FakeFs::new(cx.background_executor.clone());
-        fs.insert_tree(
-            path!("/dir"),
-            json!({
-                "one.rs": "const A: u8 = 0;\n",
-            }),
-        )
-        .await;
-        let project = Project::test(fs.clone(), [path!("/dir").as_ref()], cx).await;
-        let window =
-            cx.add_window(|window, cx| MultiWorkspace::test_new(project.clone(), window, cx));
-        let workspace = window
-            .read_with(cx, |mw, _| mw.workspace().clone())
-            .unwrap();
-        let search = cx.new(|cx| ProjectSearch::new(project, cx));
-        let search_view = cx.add_window(|window, cx| {
-            ProjectSearchView::new(workspace.downgrade(), search.clone(), window, cx, None)
-        });
-
-        perform_search(search_view, "const A", cx);
-
-        search_view
-            .update(cx, |search_view, window, cx| {
-                search_view.toggle_list_view(window, cx);
-                assert!(search_view.list_view_enabled);
-            })
-            .expect("unable to update search view");
-
-        cx.run_until_parked();
-
-        search_view
-            .update(cx, |search_view, window, cx| {
-                // Every path that focuses the results view routes through here, so it has to
-                // resolve to the view's own handle while the list is showing.
-                search_view.focus_results_editor(window, cx);
-                assert!(
-                    search_view.focus_handle.is_focused(window),
-                    "focusing the results view in list view must keep focus on the view itself"
-                );
-
-                // What the `on_focus` handler runs a frame after the view takes focus. Called
-                // directly because a test window is never drawn, so `on_next_frame` never
-                // fires.
-                search_view.forward_focus_to_input(window, cx);
-                assert!(
-                    search_view.focus_handle.is_focused(window),
-                    "list view must keep focus rather than forward it to the results editor"
-                );
-                assert!(
-                    !search_view
-                        .results_editor
-                        .focus_handle(cx)
-                        .is_focused(window),
-                );
-            })
-            .expect("unable to update search view");
     }
 
     #[perf]

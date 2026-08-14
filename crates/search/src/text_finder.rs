@@ -18,7 +18,7 @@ use text::Anchor;
 use ui::Window;
 use workspace::{DismissDecision, ItemHandle, ModalView, Workspace, WorkspaceDb, WorkspaceId};
 
-pub(crate) mod delegate;
+mod delegate;
 mod render;
 use delegate::{Delegate, matches_to_multibuffer};
 use util::ResultExt as _;
