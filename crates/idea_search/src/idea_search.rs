@@ -16,16 +16,16 @@ use std::{
 
 use collections::HashSet;
 use futures::StreamExt;
-use editor::Editor;
+use editor::{Editor, EditorEvent};
 use gpui::{
     AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, Focusable, FontWeight,
-    Global, HighlightStyle, IntoElement, ParentElement, Render, Styled, StyledText, Task, TextStyle,
-    WeakEntity, Window, actions, relative,
+    FocusHandle, Global, HighlightStyle, IntoElement, ParentElement, Render, Styled, StyledText,
+    Subscription, Task, TextStyle, WeakEntity, Window, actions, relative,
 };
 use language::{Buffer, HighlightId, LanguageAwareStyling, OffsetRangeExt as _};
 use picker::{
-    MatchLocation, Picker, PickerDelegate, PreviewLayout, PreviewSource, PreviewUpdate,
-    SetPreviewBelow, SetPreviewHidden,
+    ErasedEditor, MatchLocation, Picker, PickerDelegate, PreviewLayout, PreviewSource,
+    PreviewUpdate, SetPreviewBelow, SetPreviewHidden,
 };
 use project::{Project, ProjectPath, search::SearchQuery};
 use search::{SearchOption, SearchOptions};
@@ -36,8 +36,11 @@ use ui::{
     CommonAnimationExt, Divider, Label, ListItem, ListItemSpacing, Tooltip, h_flex, prelude::*,
     v_flex,
 };
-use util::ResultExt as _;
-use workspace::{ModalView, Workspace};
+use util::{
+    ResultExt as _,
+    paths::{PathMatcher, PathStyle},
+};
+use workspace::{ModalView, Workspace, searchable::SearchableItem as _};
 
 actions!(
     idea_search,
@@ -47,30 +50,86 @@ actions!(
     ]
 );
 
-/// The last query and options, so reopening the modal picks up where the previous search left
-/// off. Session-only: closing Zed forgets them.
-#[derive(Default)]
+/// The last query, options and filters, so reopening the modal picks up where the previous
+/// search left off. Session-only: closing Zed forgets them.
+#[derive(Clone, Default)]
 struct LastSearch {
     query: String,
     options: SearchOptions,
+    filters: Filters,
 }
 
 impl Global for LastSearch {}
 
-fn load_last_search(cx: &App) -> Option<(String, SearchOptions)> {
-    let last = cx.try_global::<LastSearch>()?;
-    (!last.query.is_empty()).then(|| (last.query.clone(), last.options))
+/// Glob patterns limiting which files are searched. Empty means no limit.
+#[derive(Clone, Default)]
+struct Filters {
+    include: String,
+    exclude: String,
 }
 
-fn store_last_search(query: String, options: SearchOptions, cx: &mut App) {
+impl Filters {
+    fn is_empty(&self) -> bool {
+        self.include.is_empty() && self.exclude.is_empty()
+    }
+}
+
+fn load_last_search(cx: &App) -> LastSearch {
+    cx.try_global::<LastSearch>().cloned().unwrap_or_default()
+}
+
+fn store_last_search(query: String, options: SearchOptions, filters: Filters, cx: &mut App) {
     let last = cx.default_global::<LastSearch>();
     last.query = query;
     last.options = options;
+    last.filters = filters;
+}
+
+/// Splits a comma-separated list of globs, leaving commas inside `{a,b}` alone. Ported from the
+/// search crate, where it is private.
+fn split_glob_patterns(text: &str) -> Vec<&str> {
+    let mut patterns = Vec::new();
+    let mut pattern_start = 0;
+    let mut brace_depth: usize = 0;
+    let mut escaped = false;
+
+    for (index, character) in text.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '{' => brace_depth += 1,
+            '}' => brace_depth = brace_depth.saturating_sub(1),
+            ',' if brace_depth == 0 => {
+                patterns.push(&text[pattern_start..index]);
+                pattern_start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    patterns.push(&text[pattern_start..]);
+    patterns
+}
+
+/// `None` when the globs do not parse, which happens constantly while typing one. Callers keep
+/// the previous filter in that case rather than dropping every result mid-keystroke.
+fn path_matcher(text: &str, path_style: PathStyle) -> Option<PathMatcher> {
+    if text.trim().is_empty() {
+        return Some(PathMatcher::default());
+    }
+    let patterns = split_glob_patterns(text)
+        .into_iter()
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+        .collect::<Vec<_>>();
+    PathMatcher::new(patterns, path_style).ok()
 }
 
 /// Bumped on every change, and shown at the trailing edge of the query input so a running build
 /// can be identified while iterating. Remove before this is considered finished.
-const VERSION: &str = "0.2.p17";
+const VERSION: &str = "0.2.p27";
 
 /// Wider than a plain picker: rows carry a line of source plus its location, and the preview
 /// pane will share this width. The picker is told the same value, or it opens at its own default
@@ -93,6 +152,9 @@ const MAX_ROW_TEXT_LEN: usize = 300;
 /// How much of a long line to keep before the match when windowing it.
 const CONTEXT_BEFORE_MATCH: usize = 40;
 
+const INCLUDE_PLACEHOLDER: &str = "Include: e.g. src/**/*.rs";
+const EXCLUDE_PLACEHOLDER: &str = "Exclude: e.g. vendor/*, *.lock";
+
 /// Options offered as toggles, in the order they appear next to the query input.
 const TOGGLEABLE_OPTIONS: [SearchOption; 4] = [
     SearchOption::CaseSensitive,
@@ -107,6 +169,11 @@ pub fn init(cx: &mut App) {
 
 pub struct IdeaSearch {
     picker: Entity<Picker<IdeaSearchDelegate>>,
+    /// The modal's own handle, containing both the picker and the filter inputs. Reporting the
+    /// picker's handle instead would make focusing a filter input look like focus leaving the
+    /// modal, which dismisses it.
+    focus_handle: FocusHandle,
+    _filter_subscriptions: Vec<Subscription>,
 }
 
 impl IdeaSearch {
@@ -118,8 +185,20 @@ impl IdeaSearch {
         workspace.register_action(move |workspace, _: &Toggle, window, cx| {
             let project = workspace.project().clone();
             let handle = cx.entity().downgrade();
+
+            // What the editor would seed a search with: the selection, subject to the user's
+            // `seed_search_query_from_cursor` setting. Empty when there is nothing to seed from,
+            // in which case the modal falls back to the last query of this session.
+            let seed = workspace
+                .active_item(cx)
+                .and_then(|item| item.act_as::<Editor>(cx))
+                .map(|editor| {
+                    editor.update(cx, |editor, cx| editor.query_suggestion(None, window, cx))
+                })
+                .filter(|query| !query.is_empty());
+
             workspace.toggle_modal(window, cx, move |window, cx| {
-                IdeaSearch::new(handle, project, window, cx)
+                IdeaSearch::new(handle, project, seed, window, cx)
             });
         });
     }
@@ -127,11 +206,22 @@ impl IdeaSearch {
     fn new(
         workspace: WeakEntity<Workspace>,
         project: Entity<Project>,
+        seed: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let project_for_preview = project.clone();
         let last_search = load_last_search(cx);
+        // A selection is a deliberate act, so it wins over the previous query; the options and
+        // filters from that search still apply either way.
+        let initial_query =
+            seed.or_else(|| (!last_search.query.is_empty()).then(|| last_search.query.clone()));
+
+        let include_editor =
+            filter_editor(INCLUDE_PLACEHOLDER, &last_search.filters.include, window, cx);
+        let exclude_editor =
+            filter_editor(EXCLUDE_PLACEHOLDER, &last_search.filters.exclude, window, cx);
+        let filter_editors = [include_editor.clone(), exclude_editor.clone()];
         let delegate = IdeaSearchDelegate {
             modal: cx.entity().downgrade(),
             workspace,
@@ -139,12 +229,13 @@ impl IdeaSearch {
             matches: Vec::new(),
             unique_files: HashSet::default(),
             selected_index: 0,
-            search_options: last_search
-                .as_ref()
-                .map(|(_, options)| *options)
-                .unwrap_or(SearchOptions::NONE),
+            search_options: last_search.options,
             is_searching: false,
             preview_layout: PreviewLayout::Hidden,
+            include_editor,
+            exclude_editor,
+            settings_expanded: !last_search.filters.is_empty()
+                || last_search.options != SearchOptions::NONE,
             cancel_flag: Arc::new(AtomicBool::new(false)),
         };
         let preview = picker_preview::editor_preview(project_for_preview, window, cx);
@@ -156,14 +247,45 @@ impl IdeaSearch {
 
         // Seeding the query runs the search, and leaves the text selected so typing replaces it
         // rather than appending to a query the user may not want.
-        if let Some((query, _)) = last_search {
+        if let Some(query) = initial_query {
             picker.update(cx, |picker, cx| {
                 picker.set_query(&query, window, cx);
                 picker.select_query(window, cx);
             });
         }
 
-        Self { picker }
+        // Editing a filter has to re-run the search; the picker only does that for its own query
+        // input.
+        let _filter_subscriptions = filter_editors
+            .into_iter()
+            .map(|editor| {
+                cx.subscribe_in(
+                    &editor,
+                    window,
+                    |this, _, event: &EditorEvent, window, cx| {
+                        if matches!(event, EditorEvent::BufferEdited) {
+                            this.picker
+                                .update(cx, |picker, cx| picker.refresh(window, cx));
+                        }
+                    },
+                )
+            })
+            .collect();
+
+        // Focus reaching the modal itself belongs in the query input.
+        let focus_handle = cx.focus_handle();
+        let picker_handle = picker.focus_handle(cx);
+        cx.on_focus(&focus_handle, window, move |_, window, cx| {
+            window.focus(&picker_handle, cx);
+        })
+        .detach();
+
+
+        Self {
+            picker,
+            focus_handle,
+            _filter_subscriptions,
+        }
     }
 }
 
@@ -202,18 +324,20 @@ impl Render for IdeaSearch {
         v_flex()
             .key_context("IdeaSearch")
             .w(MODAL_WIDTH)
+            .track_focus(&self.focus_handle)
             .capture_action(cx.listener(Self::cancel))
             .child(self.picker.clone())
     }
 }
 
 impl Focusable for IdeaSearch {
-    fn focus_handle(&self, cx: &App) -> gpui::FocusHandle {
-        self.picker.focus_handle(cx)
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
 impl EventEmitter<DismissEvent> for IdeaSearch {}
+
 impl ModalView for IdeaSearch {}
 
 /// One row: a single match, with enough context to render it and to open it later.
@@ -232,6 +356,8 @@ struct SearchMatch {
     /// The match itself, for the preview to highlight and scroll to.
     anchor_range: Range<text::Anchor>,
     match_range: Range<usize>,
+    /// The match as rows and columns, to select when opening the file.
+    point_range: Range<text::Point>,
 }
 
 pub struct IdeaSearchDelegate {
@@ -250,19 +376,104 @@ pub struct IdeaSearchDelegate {
     is_searching: bool,
     /// The picker's current preview layout, reported by `preview_layout_changed`.
     preview_layout: PreviewLayout,
+    include_editor: Entity<Editor>,
+    exclude_editor: Entity<Editor>,
+    /// Whether the settings row (options and glob filters) is showing. Its contents keep
+    /// applying while hidden, so the toggle stays lit to avoid a silently narrowed search.
+    settings_expanded: bool,
     /// Set when a search is abandoned, so a scan already running stops instead of filling the
     /// list with results for a query the user has moved on from.
     cancel_flag: Arc<AtomicBool>,
 }
 
+/// A single-line input for one of the glob filters, re-running the search as it is edited.
+fn filter_editor(
+    placeholder: &str,
+    initial: &str,
+    window: &mut Window,
+    cx: &mut Context<IdeaSearch>,
+) -> Entity<Editor> {
+    cx.new(|cx| {
+        let mut editor = Editor::single_line(window, cx);
+        editor.set_placeholder_text(placeholder, window, cx);
+        if !initial.is_empty() {
+            editor.set_text(initial, window, cx);
+        }
+        editor
+    })
+}
+
 impl IdeaSearchDelegate {
+    fn render_summary(&self) -> Option<Label> {
+        if self.matches.is_empty() {
+            return None;
+        }
+        // A capped scan stopped early, so both totals are lower bounds.
+        let capped = if self.matches.len() >= MAX_MATCHES {
+            "+"
+        } else {
+            ""
+        };
+        Some(
+            Label::new(format!(
+                "{}{capped} in {}{capped} files",
+                self.matches.len(),
+                self.unique_files.len(),
+            ))
+            .size(LabelSize::Small)
+            .color(Color::Muted),
+        )
+    }
+
+    fn render_scan_indicator(&self) -> Option<impl IntoElement> {
+        self.is_searching.then(|| {
+            Icon::new(IconName::LoadCircle)
+                .color(Color::Accent)
+                .size(IconSize::Small)
+                .with_rotate_animation(2)
+        })
+    }
+
+    fn render_option_toggles(&self, cx: &mut Context<Picker<Self>>) -> Vec<AnyElement> {
+        let active = self.search_options;
+        let picker = cx.entity();
+
+        TOGGLEABLE_OPTIONS
+            .into_iter()
+            .map(|option| {
+                let options = option.as_options();
+                let picker = picker.clone();
+
+                IconButton::new(("idea-search-option", option as usize), option.icon())
+                    .icon_size(IconSize::Small)
+                    .toggle_state(active.contains(options))
+                    .tooltip(Tooltip::text(option.label()))
+                    .on_click(move |_, window, cx| {
+                        picker.update(cx, |picker, cx| {
+                            picker.delegate.search_options.toggle(options);
+                            // Re-runs the query through `update_matches` with the new options.
+                            picker.refresh(window, cx);
+                        });
+                    })
+                    .into_any_element()
+            })
+            .collect()
+    }
+
+    fn filters(&self, cx: &App) -> Filters {
+        Filters {
+            include: self.include_editor.read(cx).text(cx),
+            exclude: self.exclude_editor.read(cx).text(cx),
+        }
+    }
+
     /// Opens the selected match in a tab, puts the cursor on its line, and closes the modal.
     fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Picker<Self>>) {
         let Some(search_match) = self.matches.get(self.selected_index) else {
             return;
         };
         let path = search_match.path.clone();
-        let row = search_match.line_number.saturating_sub(1);
+        let point_range = search_match.point_range.clone();
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
@@ -277,9 +488,11 @@ impl IdeaSearchDelegate {
 
             if let Some(editor) = item.downcast::<Editor>() {
                 editor.update_in(cx, |editor, window, cx| {
+                    // Selecting the match rather than the start of its line, so it is obvious
+                    // which occurrence was opened. The file is its own buffer here, so its
+                    // points are the editor's points.
                     editor.change_selections(Default::default(), window, cx, |selections| {
-                        let position = text::Point::new(row, 0);
-                        selections.select_ranges([position..position])
+                        selections.select_ranges([point_range.start..point_range.end])
                     });
                 })?;
             }
@@ -347,6 +560,7 @@ fn collect_matches(
                 anchor_range: range.clone(),
                 match_range: snapshot.point_to_offset(point_range.start)
                     ..snapshot.point_to_offset(point_range.end),
+                point_range: point_range.clone(),
             }
         })
         .collect()
@@ -494,6 +708,13 @@ impl PickerDelegate for IdeaSearchDelegate {
         false
     }
 
+    /// The picker dismisses itself when its query input blurs. Clicking a filter field does
+    /// exactly that, so tell it focus is still inside the modal.
+    fn has_another_open_menu(&self, window: &Window, cx: &App) -> bool {
+        self.include_editor.focus_handle(cx).is_focused(window)
+            || self.exclude_editor.focus_handle(cx).is_focused(window)
+    }
+
     fn set_selected_index(
         &mut self,
         index: usize,
@@ -520,8 +741,17 @@ impl PickerDelegate for IdeaSearchDelegate {
         if query.is_empty() {
             return Task::ready(());
         }
-        store_last_search(query.clone(), self.search_options, cx);
+        let filters = self.filters(cx);
+        store_last_search(query.clone(), self.search_options, filters.clone(), cx);
         self.is_searching = true;
+
+        let path_style = self.project.read(cx).path_style(cx);
+        // A half-typed glob does not parse; keep searching unfiltered on that side rather than
+        // emptying the list on every keystroke.
+        let files_to_include =
+            path_matcher(&filters.include, path_style).unwrap_or_else(PathMatcher::default);
+        let files_to_exclude =
+            path_matcher(&filters.exclude, path_style).unwrap_or_else(PathMatcher::default);
 
         let whole_word = self.search_options.contains(SearchOptions::WHOLE_WORD);
         let case_sensitive = self.search_options.contains(SearchOptions::CASE_SENSITIVE);
@@ -533,8 +763,8 @@ impl PickerDelegate for IdeaSearchDelegate {
                 case_sensitive,
                 include_ignored,
                 false,
-                Default::default(),
-                Default::default(),
+                files_to_include,
+                files_to_exclude,
                 false,
                 None,
             )
@@ -544,8 +774,8 @@ impl PickerDelegate for IdeaSearchDelegate {
                 whole_word,
                 case_sensitive,
                 include_ignored,
-                Default::default(),
-                Default::default(),
+                files_to_include,
+                files_to_exclude,
                 false,
                 None,
             )
@@ -625,6 +855,56 @@ impl PickerDelegate for IdeaSearchDelegate {
         self.preview_layout = layout;
     }
 
+    /// Renders the whole search bar so the settings row can live directly under the query input.
+    ///
+    /// It cannot go in `render_header`: the picker only renders that when there are matches, so
+    /// narrowing a filter to zero results would unmount the very input being typed into, drop
+    /// focus out of the modal, and send the next keystroke to the editor underneath.
+    fn render_editor(
+        &self,
+        editor: &Arc<dyn ErasedEditor>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) -> Option<Div> {
+        let field = |editor: &Entity<Editor>| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .px_2()
+                .py_1()
+                .child(editor.clone())
+        };
+
+        Some(
+            v_flex()
+                .child(
+                    h_flex()
+                        .h_9()
+                        .px_2p5()
+                        .flex_none()
+                        .overflow_hidden()
+                        .child(div().flex_1().child(editor.render(window, cx)))
+                        .children(self.searchbar_trailer(window, cx)),
+                )
+                .when(self.settings_expanded, |this| {
+                    this.child(
+                        h_flex()
+                            .w_full()
+                            .px_2p5()
+                            .gap_2()
+                            .border_t_1()
+                            .border_color(cx.theme().colors().border_variant)
+                            .child(h_flex().gap_px().flex_none().children(self.render_option_toggles(cx)))
+                            .child(Divider::vertical())
+                            .child(field(&self.include_editor))
+                            .child(Divider::vertical())
+                            .child(field(&self.exclude_editor)),
+                    )
+                })
+                .child(Divider::horizontal()),
+        )
+    }
+
     /// Picker pulls this whenever the selection changes and drives the preview pane with it.
     fn try_get_preview_data_for_match(&self, _cx: &App) -> Option<PreviewUpdate> {
         let search_match = self.matches.get(self.selected_index)?;
@@ -642,25 +922,28 @@ impl PickerDelegate for IdeaSearchDelegate {
         _window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Option<AnyElement> {
-        let active = self.search_options;
         let picker = cx.entity();
 
-        let toggles = TOGGLEABLE_OPTIONS.into_iter().map(|option| {
-            let options = option.as_options();
-            let picker = picker.clone();
-
-            IconButton::new(("idea-search-option", option as usize), option.icon())
-                .icon_size(IconSize::Small)
-                .toggle_state(active.contains(options))
-                .tooltip(Tooltip::text(option.label()))
-                .on_click(move |_, window, cx| {
+        // Stays lit while the row is collapsed if anything in it is set, so a search narrowed by
+        // a hidden filter or option is never silent.
+        let settings_active = self.settings_expanded
+            || !self.filters(cx).is_empty()
+            || self.search_options != SearchOptions::NONE;
+        let settings_toggle = IconButton::new("idea-search-settings", IconName::Settings)
+            .icon_size(IconSize::Small)
+            .toggle_state(settings_active)
+            .tooltip(Tooltip::text("Search Settings"))
+            .on_click({
+                let picker = picker.clone();
+                move |_, _window, cx| {
                     picker.update(cx, |picker, cx| {
-                        picker.delegate.search_options.toggle(options);
-                        // Re-runs the query through `update_matches` with the new options.
-                        picker.refresh(window, cx);
+                        picker.delegate.settings_expanded = !picker.delegate.settings_expanded;
+                        // Nothing about the search changed, so no re-run: refreshing here throws
+                        // the results away and flashes "no matches" while the same search reruns.
+                        cx.notify();
                     });
-                })
-        });
+                }
+            });
 
         // The preview toggle lives here rather than in the footer, where the picker puts it by
         // default: `render_footer` below replaces that whole strip. Only the below-the-list
@@ -682,8 +965,9 @@ impl PickerDelegate for IdeaSearchDelegate {
         Some(
             h_flex()
                 .gap_px()
-                .children(toggles)
-                .child(Divider::vertical().mx_1())
+                .children(self.render_summary())
+                .children(self.render_scan_indicator())
+                .child(settings_toggle)
                 .child(preview_toggle)
                 .into_any_element(),
         )
@@ -725,29 +1009,6 @@ impl PickerDelegate for IdeaSearchDelegate {
                 )
         });
 
-        let summary = (!self.matches.is_empty()).then(|| {
-            // A capped scan stopped early, so both totals are lower bounds.
-            let capped = if self.matches.len() >= MAX_MATCHES {
-                "+"
-            } else {
-                ""
-            };
-            Label::new(format!(
-                "{}{capped} matches in {}{capped} files",
-                self.matches.len(),
-                self.unique_files.len(),
-            ))
-            .size(LabelSize::Small)
-            .color(Color::Muted)
-        });
-
-        let spinner = self.is_searching.then(|| {
-            Icon::new(IconName::LoadCircle)
-                .color(Color::Accent)
-                .size(IconSize::Small)
-                .with_rotate_animation(2)
-        });
-
         Some(
             h_flex()
                 .w_full()
@@ -757,16 +1018,9 @@ impl PickerDelegate for IdeaSearchDelegate {
                 .justify_between()
                 .child(div().flex_1().min_w_0().truncate().children(location))
                 .child(
-                    h_flex()
-                        .flex_none()
-                        .gap_1p5()
-                        .children(spinner)
-                        .children(summary)
-                        .child(
-                            Label::new(VERSION)
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        ),
+                    Label::new(VERSION)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
                 )
                 .into_any_element(),
         )
