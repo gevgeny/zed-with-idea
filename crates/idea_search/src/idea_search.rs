@@ -19,13 +19,13 @@ use futures::StreamExt;
 use editor::Editor;
 use gpui::{
     AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, Focusable, FontWeight,
-    HighlightStyle, IntoElement, ParentElement, Render, Styled, StyledText, Task, TextStyle,
+    Global, HighlightStyle, IntoElement, ParentElement, Render, Styled, StyledText, Task, TextStyle,
     WeakEntity, Window, actions, relative,
 };
 use language::{Buffer, HighlightId, LanguageAwareStyling, OffsetRangeExt as _};
 use picker::{
-    MatchLocation, Picker, PickerDelegate, PreviewSource, PreviewUpdate, SetPreviewBelow,
-    SetPreviewHidden, TogglePreview,
+    MatchLocation, Picker, PickerDelegate, PreviewLayout, PreviewSource, PreviewUpdate,
+    SetPreviewBelow, SetPreviewHidden,
 };
 use project::{Project, ProjectPath, search::SearchQuery};
 use search::{SearchOption, SearchOptions};
@@ -47,9 +47,30 @@ actions!(
     ]
 );
 
+/// The last query and options, so reopening the modal picks up where the previous search left
+/// off. Session-only: closing Zed forgets them.
+#[derive(Default)]
+struct LastSearch {
+    query: String,
+    options: SearchOptions,
+}
+
+impl Global for LastSearch {}
+
+fn load_last_search(cx: &App) -> Option<(String, SearchOptions)> {
+    let last = cx.try_global::<LastSearch>()?;
+    (!last.query.is_empty()).then(|| (last.query.clone(), last.options))
+}
+
+fn store_last_search(query: String, options: SearchOptions, cx: &mut App) {
+    let last = cx.default_global::<LastSearch>();
+    last.query = query;
+    last.options = options;
+}
+
 /// Bumped on every change, and shown at the trailing edge of the query input so a running build
 /// can be identified while iterating. Remove before this is considered finished.
-const VERSION: &str = "0.2.p12";
+const VERSION: &str = "0.2.p17";
 
 /// Wider than a plain picker: rows carry a line of source plus its location, and the preview
 /// pane will share this width. The picker is told the same value, or it opens at its own default
@@ -110,6 +131,7 @@ impl IdeaSearch {
         cx: &mut Context<Self>,
     ) -> Self {
         let project_for_preview = project.clone();
+        let last_search = load_last_search(cx);
         let delegate = IdeaSearchDelegate {
             modal: cx.entity().downgrade(),
             workspace,
@@ -117,9 +139,12 @@ impl IdeaSearch {
             matches: Vec::new(),
             unique_files: HashSet::default(),
             selected_index: 0,
-            search_options: SearchOptions::NONE,
+            search_options: last_search
+                .as_ref()
+                .map(|(_, options)| *options)
+                .unwrap_or(SearchOptions::NONE),
             is_searching: false,
-            preview_visible: true,
+            preview_layout: PreviewLayout::Hidden,
             cancel_flag: Arc::new(AtomicBool::new(false)),
         };
         let preview = picker_preview::editor_preview(project_for_preview, window, cx);
@@ -129,17 +154,14 @@ impl IdeaSearch {
                 .show_scrollbar(true)
         });
 
-        // The picker restores whichever layout was last used, including to the right or hidden.
-        // Only the below-the-list layout is offered here, so pin it; this also makes the
-        // toggle's initial state known, since the picker does not expose its layout.
-        //
-        // On the next frame rather than immediately: dispatching to a focus handle looks it up
-        // in the last rendered frame's dispatch tree, and nothing has been rendered yet here, so
-        // an immediate dispatch is silently dropped.
-        let picker_focus_handle = picker.focus_handle(cx);
-        cx.on_next_frame(window, move |_, window, cx| {
-            picker_focus_handle.dispatch_action(&SetPreviewBelow, window, cx);
-        });
+        // Seeding the query runs the search, and leaves the text selected so typing replaces it
+        // rather than appending to a query the user may not want.
+        if let Some((query, _)) = last_search {
+            picker.update(cx, |picker, cx| {
+                picker.set_query(&query, window, cx);
+                picker.select_query(window, cx);
+            });
+        }
 
         Self { picker }
     }
@@ -159,42 +181,28 @@ impl IdeaSearch {
         cx.stop_propagation();
     }
 
-    /// The picker owns preview visibility but does not expose it, so mirror every action that
-    /// changes it. These run in the capture phase and do not stop propagation: the picker still
-    /// handles them.
-    fn preview_toggled(&mut self, _: &TogglePreview, _window: &mut Window, cx: &mut Context<Self>) {
-        self.set_preview_visible(!self.preview_visible(cx), cx);
-    }
-
-    fn preview_shown(&mut self, _: &SetPreviewBelow, _window: &mut Window, cx: &mut Context<Self>) {
-        self.set_preview_visible(true, cx);
-    }
-
-    fn preview_hidden(&mut self, _: &SetPreviewHidden, _window: &mut Window, cx: &mut Context<Self>) {
-        self.set_preview_visible(false, cx);
-    }
-
-    fn preview_visible(&self, cx: &App) -> bool {
-        self.picker.read(cx).delegate.preview_visible
-    }
-
-    fn set_preview_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
-        self.picker.update(cx, |picker, cx| {
-            picker.delegate.preview_visible = visible;
-            cx.notify();
+    /// Only the below-the-list layout is offered here, but the picker restores whichever layout
+    /// was last used, which may be to the side. Correct it from `render`, where the picker can
+    /// be read safely and where a failed dispatch simply gets retried on the next frame.
+    fn pin_preview_below(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker.read(cx).delegate.preview_layout != PreviewLayout::Right {
+            return;
+        }
+        let focus_handle = self.picker.focus_handle(cx);
+        window.defer(cx, move |window, cx| {
+            focus_handle.dispatch_action(&SetPreviewBelow, window, cx);
         });
     }
 }
 
 impl Render for IdeaSearch {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.pin_preview_below(window, cx);
+
         v_flex()
             .key_context("IdeaSearch")
             .w(MODAL_WIDTH)
             .capture_action(cx.listener(Self::cancel))
-            .capture_action(cx.listener(Self::preview_toggled))
-            .capture_action(cx.listener(Self::preview_shown))
-            .capture_action(cx.listener(Self::preview_hidden))
             .child(self.picker.clone())
     }
 }
@@ -240,9 +248,8 @@ pub struct IdeaSearchDelegate {
     /// Whether a scan is still running, so the summary can distinguish "no results yet" from
     /// "no results".
     is_searching: bool,
-    /// Mirrors the picker's preview visibility, which it does not expose. Kept in step by
-    /// forcing the layout when the modal opens and by watching `TogglePreview`.
-    preview_visible: bool,
+    /// The picker's current preview layout, reported by `preview_layout_changed`.
+    preview_layout: PreviewLayout,
     /// Set when a search is abandoned, so a scan already running stops instead of filling the
     /// list with results for a query the user has moved on from.
     cancel_flag: Arc<AtomicBool>,
@@ -481,6 +488,12 @@ impl PickerDelegate for IdeaSearchDelegate {
         self.selected_index
     }
 
+    /// Hovering must not move the selection: the preview follows it, so passing the pointer over
+    /// the list would load a buffer per row. Rows still highlight under the cursor.
+    fn select_on_hover(&self) -> bool {
+        false
+    }
+
     fn set_selected_index(
         &mut self,
         index: usize,
@@ -507,6 +520,7 @@ impl PickerDelegate for IdeaSearchDelegate {
         if query.is_empty() {
             return Task::ready(());
         }
+        store_last_search(query.clone(), self.search_options, cx);
         self.is_searching = true;
 
         let whole_word = self.search_options.contains(SearchOptions::WHOLE_WORD);
@@ -604,12 +618,11 @@ impl PickerDelegate for IdeaSearchDelegate {
         })
     }
 
-    /// Only reports whether the layout is horizontal, so it cannot distinguish hidden from
-    /// below. Still worth tracking: a switch to the side layout means the preview is visible.
-    fn preview_layout_changed(&mut self, layout_is_horizontal: bool) {
-        if layout_is_horizontal {
-            self.preview_visible = true;
-        }
+    /// The picker reports its layout here, at construction and on every change, which is the
+    /// only way to know it: `Picker::preview_layout` is private, and reading the picker from a
+    /// delegate method would panic anyway, since the picker is mid-update while it renders.
+    fn preview_layout_changed(&mut self, layout: PreviewLayout) {
+        self.preview_layout = layout;
     }
 
     /// Picker pulls this whenever the selection changes and drives the preview pane with it.
@@ -652,7 +665,7 @@ impl PickerDelegate for IdeaSearchDelegate {
         // The preview toggle lives here rather than in the footer, where the picker puts it by
         // default: `render_footer` below replaces that whole strip. Only the below-the-list
         // layout is offered, so this is on/off rather than a layout choice.
-        let preview_visible = self.preview_visible;
+        let preview_visible = self.preview_layout != PreviewLayout::Hidden;
         let preview_toggle = IconButton::new("idea-search-preview-toggle", IconName::Eye)
             .icon_size(IconSize::Small)
             .toggle_state(preview_visible)
@@ -829,7 +842,9 @@ impl PickerDelegate for IdeaSearchDelegate {
                 .on_click(move |event: &ClickEvent, window, cx| {
                     let opening = event.click_count() >= 2;
                     picker.update(cx, |picker, cx| {
-                        picker.delegate.selected_index = ix;
+                        // Through the picker rather than assigning `selected_index`: this is
+                        // what refreshes the preview for the new selection.
+                        picker.set_selected_index(ix, None, false, window, cx);
                         if opening {
                             picker.delegate.open_selected(window, cx);
                         }

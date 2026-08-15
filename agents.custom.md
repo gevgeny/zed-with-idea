@@ -1,6 +1,11 @@
 # Custom agent rules
 
-Rules earned from real debugging sessions. Traps to avoid, not architecture notes.
+Traps to avoid, earned from debugging this codebase. Not architecture notes, and not general
+engineering advice — everything here is specific enough to act on.
+
+Nothing loads this file automatically: `.rules` is what agents read, via the `AGENTS.md` and
+`CLAUDE.md` symlinks. Point at it from there if you want it picked up, at the cost of a line of
+merge surface with upstream.
 
 ## Before adding a view mode, find every handler that forwards focus
 
@@ -30,10 +35,7 @@ Escalate in this order, stopping when the cause is named:
 
 Step 4 is what actually resolves it. Steps 1–3 only narrow the target enough to aim it. Gate all of it behind an env var, and delete it once the cause is confirmed.
 
-## Bisect a broken feature by removal, not by patching
+Two things that cost real time here:
 
-When a new feature misbehaves and the cause is not obvious, strip it back to the smallest version that still shows the bug, then re-add one piece at a time. Each step is independently testable and each answer is unambiguous.
-
-This is faster than patching a suspected cause: a patch that does not fix it teaches nothing about what did, while a removal that does not fix it eliminates everything removed.
-
-Corollary: when a workaround makes the symptom disappear, that is not a diagnosis. Note that it works, then keep going — a suppressed cause resurfaces somewhere with no obvious connection to the change that exposed it.
+- **A workaround that hides the symptom is not a diagnosis.** Covering the unmounted view stopped the flicker, which made it look solved; the cause was still there and resurfaced later as arrow keys that did nothing.
+- **Verify a check can fail.** A regression test written for these guards passed with the guard deleted, because the code path it aimed at only runs on a drawn frame and a test window is never drawn. Delete the guard, watch the test go red, then put it back.
