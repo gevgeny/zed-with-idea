@@ -8962,6 +8962,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25a2bc672d1148e28034f176e01fffebb08b35768468cc954630da77a1449005"
 
 [[package]]
+name = "idea_search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "menu",
+ "picker",
+ "picker_preview",
+ "project",
+ "search",
+ "settings",
+ "text",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -23343,6 +23367,7 @@ dependencies = [
  "gpui_tokio",
  "hdrhistogram",
  "http_client",
+ "idea_search",
  "image",
  "image_viewer",
  "input_latency_ui",

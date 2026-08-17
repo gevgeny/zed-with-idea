@@ -364,7 +364,7 @@ pub trait PickerDelegate: Sized + 'static {
 
     /// Called on the delegate when opening a preview to the side. Delegates can
     /// then change how much space they use for rendering the match
-    fn preview_layout_changed(&mut self, _layout_is_horizontal: bool) {}
+    fn preview_layout_changed(&mut self, _layout: preview::Layout) {}
 
     fn render_match(
         &self,
@@ -639,7 +639,7 @@ impl<D: PickerDelegate> Picker<D> {
         };
         // give delegate the initial preview layout
         this.delegate
-            .preview_layout_changed(matches!(initial_layout, preview::Layout::Right));
+            .preview_layout_changed(initial_layout);
         if this.reopenable {
             let focus_handle = this.focus_handle(cx);
             workspace::register_reopenable_picker(&focus_handle, cx);
@@ -1598,8 +1598,7 @@ impl<D: PickerDelegate> Picker<D> {
                     layout,
                 ))
             });
-        self.delegate
-            .preview_layout_changed(matches!(layout, preview::Layout::Right));
+        self.delegate.preview_layout_changed(layout);
         cx.notify();
     }
 }
