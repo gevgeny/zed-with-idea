@@ -8962,6 +8962,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25a2bc672d1148e28034f176e01fffebb08b35768468cc954630da77a1449005"
 
 [[package]]
+name = "idea_git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "buffer_diff",
+ "editor",
+ "file_icons",
+ "fuzzy",
+ "git",
+ "gpui",
+ "language",
+ "menu",
+ "multi_buffer",
+ "picker",
+ "project",
+ "settings",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "idea_search"
 version = "0.1.0"
 dependencies = [
@@ -23367,6 +23390,7 @@ dependencies = [
  "gpui_tokio",
  "hdrhistogram",
  "http_client",
+ "idea_git",
  "idea_search",
  "image",
  "image_viewer",
