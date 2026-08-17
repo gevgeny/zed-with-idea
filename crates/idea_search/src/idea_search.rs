@@ -15,12 +15,12 @@ use std::{
 };
 
 use collections::HashSet;
-use futures::StreamExt;
 use editor::{Editor, EditorEvent};
+use futures::StreamExt;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, Focusable, FontWeight,
-    FocusHandle, Global, HighlightStyle, IntoElement, ParentElement, Render, Styled, StyledText,
-    Subscription, Task, TextStyle, WeakEntity, Window, actions, relative,
+    AnyElement, App, ClickEvent, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, FontWeight, Global, HighlightStyle, IntoElement, ParentElement, Render, Styled,
+    StyledText, Subscription, Task, TextStyle, WeakEntity, Window, actions, relative,
 };
 use language::{Buffer, HighlightId, LanguageAwareStyling, OffsetRangeExt as _};
 use picker::{
@@ -113,27 +113,23 @@ fn split_glob_patterns(text: &str) -> Vec<&str> {
     patterns
 }
 
-/// `None` when the globs do not parse, which happens constantly while typing one. Callers keep
-/// the previous filter in that case rather than dropping every result mid-keystroke.
-fn path_matcher(text: &str, path_style: PathStyle) -> Option<PathMatcher> {
-    if text.trim().is_empty() {
-        return Some(PathMatcher::default());
-    }
+/// Matches everything when the globs do not parse, which happens constantly while typing one:
+/// searching unfiltered beats dropping every result on each keystroke.
+fn path_matcher(text: &str, path_style: PathStyle) -> PathMatcher {
     let patterns = split_glob_patterns(text)
         .into_iter()
         .map(str::trim)
         .filter(|pattern| !pattern.is_empty())
         .collect::<Vec<_>>();
-    PathMatcher::new(patterns, path_style).ok()
+    PathMatcher::new(patterns, path_style).unwrap_or_default()
 }
 
 /// Bumped on every change, and shown at the trailing edge of the query input so a running build
 /// can be identified while iterating. Remove before this is considered finished.
-const VERSION: &str = "0.2.p27";
+const VERSION: &str = "0.2.p35";
 
 /// Wider than a plain picker: rows carry a line of source plus its location, and the preview
-/// pane will share this width. The picker is told the same value, or it opens at its own default
-/// and leaves a gap inside the modal.
+/// pane shares the width.
 const MODAL_WIDTH: Rems = Rems(48.);
 
 /// Waited out before a search starts, so typing does not queue a scan per keystroke.
@@ -169,9 +165,9 @@ pub fn init(cx: &mut App) {
 
 pub struct IdeaSearch {
     picker: Entity<Picker<IdeaSearchDelegate>>,
-    /// The modal's own handle, containing both the picker and the filter inputs. Reporting the
-    /// picker's handle instead would make focusing a filter input look like focus leaving the
-    /// modal, which dismisses it.
+    /// Wraps the picker, the filter inputs and the preview. The picker dismisses itself whenever
+    /// its query input blurs, so it needs a way to ask whether focus merely moved elsewhere
+    /// inside the modal; this handle answers that for every part at once.
     focus_handle: FocusHandle,
     _filter_subscriptions: Vec<Subscription>,
 }
@@ -217,13 +213,24 @@ impl IdeaSearch {
         let initial_query =
             seed.or_else(|| (!last_search.query.is_empty()).then(|| last_search.query.clone()));
 
-        let include_editor =
-            filter_editor(INCLUDE_PLACEHOLDER, &last_search.filters.include, window, cx);
-        let exclude_editor =
-            filter_editor(EXCLUDE_PLACEHOLDER, &last_search.filters.exclude, window, cx);
-        let filter_editors = [include_editor.clone(), exclude_editor.clone()];
+        let include_editor = filter_editor(
+            INCLUDE_PLACEHOLDER,
+            &last_search.filters.include,
+            window,
+            cx,
+        );
+        let exclude_editor = filter_editor(
+            EXCLUDE_PLACEHOLDER,
+            &last_search.filters.exclude,
+            window,
+            cx,
+        );
+        let include_editor_handle = include_editor.clone();
+        let exclude_editor_handle = exclude_editor.clone();
+        let focus_handle = cx.focus_handle();
         let delegate = IdeaSearchDelegate {
             modal: cx.entity().downgrade(),
+            modal_focus_handle: focus_handle.clone(),
             workspace,
             project,
             matches: Vec::new(),
@@ -232,17 +239,21 @@ impl IdeaSearch {
             search_options: last_search.options,
             is_searching: false,
             preview_layout: PreviewLayout::Hidden,
+            preview_enabled: true,
             include_editor,
             exclude_editor,
             settings_expanded: !last_search.filters.is_empty()
                 || last_search.options != SearchOptions::NONE,
             cancel_flag: Arc::new(AtomicBool::new(false)),
         };
-        let preview = picker_preview::editor_preview(project_for_preview, window, cx);
+        let preview = picker_preview::scrollable_editor_preview(project_for_preview, window, cx);
         let picker = cx.new(|cx| {
             Picker::uniform_list_with_preview(delegate, preview, window, cx)
                 .initial_width(MODAL_WIDTH)
                 .show_scrollbar(true)
+                // The picker turns dragging on for previews, but this modal sizes itself from
+                // its contents, so a dragged size fights the layout it recomputes each frame.
+                .resizable(false)
         });
 
         // Seeding the query runs the search, and leaves the text selected so typing replaces it
@@ -256,30 +267,20 @@ impl IdeaSearch {
 
         // Editing a filter has to re-run the search; the picker only does that for its own query
         // input.
-        let _filter_subscriptions = filter_editors
-            .into_iter()
-            .map(|editor| {
-                cx.subscribe_in(
-                    &editor,
-                    window,
-                    |this, _, event: &EditorEvent, window, cx| {
-                        if matches!(event, EditorEvent::BufferEdited) {
-                            this.picker
-                                .update(cx, |picker, cx| picker.refresh(window, cx));
-                        }
-                    },
-                )
-            })
-            .collect();
-
-        // Focus reaching the modal itself belongs in the query input.
-        let focus_handle = cx.focus_handle();
-        let picker_handle = picker.focus_handle(cx);
-        cx.on_focus(&focus_handle, window, move |_, window, cx| {
-            window.focus(&picker_handle, cx);
-        })
-        .detach();
-
+        let rerun_on_edit = |this: &mut Self,
+                             _: &Entity<Editor>,
+                             event: &EditorEvent,
+                             window: &mut Window,
+                             cx: &mut Context<Self>| {
+            if matches!(event, EditorEvent::BufferEdited) {
+                this.picker
+                    .update(cx, |picker, cx| picker.refresh(window, cx));
+            }
+        };
+        let _filter_subscriptions = vec![
+            cx.subscribe_in(&include_editor_handle, window, rerun_on_edit),
+            cx.subscribe_in(&exclude_editor_handle, window, rerun_on_edit),
+        ];
 
         Self {
             picker,
@@ -303,27 +304,43 @@ impl IdeaSearch {
         cx.stop_propagation();
     }
 
-    /// Only the below-the-list layout is offered here, but the picker restores whichever layout
-    /// was last used, which may be to the side. Correct it from `render`, where the picker can
-    /// be read safely and where a failed dispatch simply gets retried on the next frame.
-    fn pin_preview_below(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.picker.read(cx).delegate.preview_layout != PreviewLayout::Right {
+    /// Keeps the picker's preview layout matching what there is to show: below the list when a
+    /// match is selected and the user wants a preview, hidden otherwise, which also shrinks the
+    /// modal to the size of its contents instead of leaving an empty pane.
+    ///
+    /// Driven from `render` because the layout is only reachable by dispatching an action, and a
+    /// dispatch that lands too early is simply retried on the next frame.
+    fn sync_preview_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let delegate = &self.picker.read(cx).delegate;
+        let wanted = if delegate.preview_enabled && delegate.match_count() > 0 {
+            PreviewLayout::Below
+        } else {
+            PreviewLayout::Hidden
+        };
+        if delegate.preview_layout == wanted {
             return;
         }
+
+        let action: &dyn gpui::Action = if wanted == PreviewLayout::Hidden {
+            &SetPreviewHidden
+        } else {
+            &SetPreviewBelow
+        };
         let focus_handle = self.picker.focus_handle(cx);
         window.defer(cx, move |window, cx| {
-            focus_handle.dispatch_action(&SetPreviewBelow, window, cx);
+            focus_handle.dispatch_action(action, window, cx);
         });
     }
 }
 
 impl Render for IdeaSearch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.pin_preview_below(window, cx);
+        self.sync_preview_layout(window, cx);
 
+        // No width here: the picker owns its size (see `initial_width`), and a second width on
+        // the wrapper clips whatever the picker lays out wider — the trailing controls first.
         v_flex()
             .key_context("IdeaSearch")
-            .w(MODAL_WIDTH)
             .track_focus(&self.focus_handle)
             .capture_action(cx.listener(Self::cancel))
             .child(self.picker.clone())
@@ -331,8 +348,8 @@ impl Render for IdeaSearch {
 }
 
 impl Focusable for IdeaSearch {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
+    fn focus_handle(&self, cx: &App) -> FocusHandle {
+        self.picker.focus_handle(cx)
     }
 }
 
@@ -364,6 +381,8 @@ pub struct IdeaSearchDelegate {
     /// The picker reports dismissal to its delegate; the modal only closes once that is passed
     /// on as a `DismissEvent`.
     modal: WeakEntity<IdeaSearch>,
+    /// The modal's focus handle, for telling the picker that focus is still inside it.
+    modal_focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     matches: Vec<SearchMatch>,
@@ -376,6 +395,9 @@ pub struct IdeaSearchDelegate {
     is_searching: bool,
     /// The picker's current preview layout, reported by `preview_layout_changed`.
     preview_layout: PreviewLayout,
+    /// Whether the user wants a preview at all. Separate from the layout, which is also hidden
+    /// when there is no match to show.
+    preview_enabled: bool,
     include_editor: Entity<Editor>,
     exclude_editor: Entity<Editor>,
     /// Whether the settings row (options and glob filters) is showing. Its contents keep
@@ -396,9 +418,7 @@ fn filter_editor(
     cx.new(|cx| {
         let mut editor = Editor::single_line(window, cx);
         editor.set_placeholder_text(placeholder, window, cx);
-        if !initial.is_empty() {
-            editor.set_text(initial, window, cx);
-        }
+        editor.set_text(initial, window, cx);
         editor
     })
 }
@@ -617,7 +637,10 @@ mod tests {
 
     /// What `HighlightedLabel` requires of us: in-bounds, on char boundaries, start before end.
     fn assert_usable(text: &str, highlight: &Range<usize>) {
-        assert!(highlight.start <= highlight.end, "{highlight:?} in {text:?}");
+        assert!(
+            highlight.start <= highlight.end,
+            "{highlight:?} in {text:?}"
+        );
         assert!(highlight.end <= text.len(), "{highlight:?} in {text:?}");
         assert!(text.is_char_boundary(highlight.start), "{highlight:?}");
         assert!(text.is_char_boundary(highlight.end), "{highlight:?}");
@@ -708,11 +731,10 @@ impl PickerDelegate for IdeaSearchDelegate {
         false
     }
 
-    /// The picker dismisses itself when its query input blurs. Clicking a filter field does
-    /// exactly that, so tell it focus is still inside the modal.
+    /// The picker dismisses itself when its query input blurs. Clicking a filter field or the
+    /// preview does exactly that, so report focus that merely moved elsewhere in the modal.
     fn has_another_open_menu(&self, window: &Window, cx: &App) -> bool {
-        self.include_editor.focus_handle(cx).is_focused(window)
-            || self.exclude_editor.focus_handle(cx).is_focused(window)
+        self.modal_focus_handle.contains_focused(window, cx)
     }
 
     fn set_selected_index(
@@ -746,12 +768,8 @@ impl PickerDelegate for IdeaSearchDelegate {
         self.is_searching = true;
 
         let path_style = self.project.read(cx).path_style(cx);
-        // A half-typed glob does not parse; keep searching unfiltered on that side rather than
-        // emptying the list on every keystroke.
-        let files_to_include =
-            path_matcher(&filters.include, path_style).unwrap_or_else(PathMatcher::default);
-        let files_to_exclude =
-            path_matcher(&filters.exclude, path_style).unwrap_or_else(PathMatcher::default);
+        let files_to_include = path_matcher(&filters.include, path_style);
+        let files_to_exclude = path_matcher(&filters.exclude, path_style);
 
         let whole_word = self.search_options.contains(SearchOptions::WHOLE_WORD);
         let case_sensitive = self.search_options.contains(SearchOptions::CASE_SENSITIVE);
@@ -866,14 +884,8 @@ impl PickerDelegate for IdeaSearchDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Div> {
-        let field = |editor: &Entity<Editor>| {
-            div()
-                .flex_1()
-                .min_w_0()
-                .px_2()
-                .py_1()
-                .child(editor.clone())
-        };
+        let field =
+            |editor: &Entity<Editor>| div().flex_1().min_w_0().px_2().py_1().child(editor.clone());
 
         Some(
             v_flex()
@@ -894,7 +906,12 @@ impl PickerDelegate for IdeaSearchDelegate {
                             .gap_2()
                             .border_t_1()
                             .border_color(cx.theme().colors().border_variant)
-                            .child(h_flex().gap_px().flex_none().children(self.render_option_toggles(cx)))
+                            .child(
+                                h_flex()
+                                    .gap_px()
+                                    .flex_none()
+                                    .children(self.render_option_toggles(cx)),
+                            )
                             .child(Divider::vertical())
                             .child(field(&self.include_editor))
                             .child(Divider::vertical())
@@ -948,18 +965,22 @@ impl PickerDelegate for IdeaSearchDelegate {
         // The preview toggle lives here rather than in the footer, where the picker puts it by
         // default: `render_footer` below replaces that whole strip. Only the below-the-list
         // layout is offered, so this is on/off rather than a layout choice.
-        let preview_visible = self.preview_layout != PreviewLayout::Hidden;
+        // Reflects the user's choice rather than the current layout, which is also hidden while
+        // there is nothing to preview.
+        let preview_enabled = self.preview_enabled;
         let preview_toggle = IconButton::new("idea-search-preview-toggle", IconName::Eye)
             .icon_size(IconSize::Small)
-            .toggle_state(preview_visible)
+            .toggle_state(preview_enabled)
             .tooltip(Tooltip::text("Toggle Preview"))
-            .on_click(move |_, window, cx| {
-                let action: &dyn gpui::Action = if preview_visible {
-                    &SetPreviewHidden
-                } else {
-                    &SetPreviewBelow
-                };
-                window.dispatch_action(action.boxed_clone(), cx);
+            .on_click({
+                let picker = picker.clone();
+                move |_, _window, cx| {
+                    picker.update(cx, |picker, cx| {
+                        picker.delegate.preview_enabled = !preview_enabled;
+                        // `sync_preview_layout` applies it on the next render.
+                        cx.notify();
+                    });
+                }
             });
 
         Some(
@@ -1096,6 +1117,12 @@ impl PickerDelegate for IdeaSearchDelegate {
                 .on_click(move |event: &ClickEvent, window, cx| {
                     let opening = event.click_count() >= 2;
                     picker.update(cx, |picker, cx| {
+                        // Clicking the preview leaves focus in its editor, where the arrow keys
+                        // bind to cursor movement. Returning to the list has to take focus back,
+                        // or the arrows keep driving the preview.
+                        let query_input = picker.focus_handle(cx);
+                        window.focus(&query_input, cx);
+
                         // Through the picker rather than assigning `selected_index`: this is
                         // what refreshes the preview for the new selection.
                         picker.set_selected_index(ix, None, false, window, cx);
@@ -1113,10 +1140,12 @@ impl PickerDelegate for IdeaSearchDelegate {
                         .gap_2()
                         .justify_between()
                         .text_sm()
-                        .child(div().flex_1().min_w_0().truncate().child(
-                            StyledText::new(search_match.line_text.clone())
-                                .with_default_highlights(&text_style, highlights),
-                        ))
+                        .child(
+                            div().flex_1().min_w_0().truncate().child(
+                                StyledText::new(search_match.line_text.clone())
+                                    .with_default_highlights(&text_style, highlights),
+                            ),
+                        )
                         .child(
                             Label::new(format!("{file_name}:{}", search_match.line_number))
                                 .size(LabelSize::Small)
