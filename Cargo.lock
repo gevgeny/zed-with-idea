@@ -8966,11 +8966,14 @@ name = "idea_git"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "askpass",
  "buffer_diff",
  "editor",
  "file_icons",
  "fuzzy",
  "git",
+ "git_ui",
+ "git_ui_core",
  "gpui",
  "language",
  "menu",

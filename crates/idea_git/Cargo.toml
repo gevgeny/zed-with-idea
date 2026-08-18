@@ -14,11 +14,14 @@ doctest = false
 
 [dependencies]
 anyhow.workspace = true
+askpass.workspace = true
 buffer_diff.workspace = true
 editor.workspace = true
 file_icons.workspace = true
 fuzzy.workspace = true
 git.workspace = true
+git_ui.workspace = true
+git_ui_core.workspace = true
 gpui.workspace = true
 language.workspace = true
 menu.workspace = true
