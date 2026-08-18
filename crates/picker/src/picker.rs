@@ -366,26 +366,6 @@ pub trait PickerDelegate: Sized + 'static {
     /// then change how much space they use for rendering the match
     fn preview_layout_changed(&mut self, _layout: preview::Layout) {}
 
-    /// The horizontal step between levels of a delegate that renders its matches as a tree.
-    /// Returning a size draws indent guides over the list; the default draws none.
-    ///
-    /// Only meaningful for `uniform_list` pickers, which is where the decoration attaches.
-    fn indent_size(&self, _cx: &App) -> Option<Pixels> {
-        None
-    }
-
-    /// The tree depth of each match in `range`, in order, for drawing the indent guides.
-    fn visible_depths(&self, _range: Range<usize>) -> Vec<usize> {
-        Vec::new()
-    }
-
-    /// Where the indent guides sit horizontally. The default lines them up with the icon column
-    /// of a plain [`ListItem`], which is what a match usually renders as; delegates whose rows
-    /// put something else in front of the icon can shift them.
-    fn indent_guide_left_offset(&self, _cx: &App) -> Pixels {
-        ui::LIST_ITEM_INDENT_GUIDE_LEFT_OFFSET
-    }
-
     fn render_match(
         &self,
         ix: usize,
@@ -632,7 +612,8 @@ impl<D: PickerDelegate> Picker<D> {
             reopenable: true,
         };
         // give delegate the initial preview layout
-        this.delegate.preview_layout_changed(initial_layout);
+        this.delegate
+            .preview_layout_changed(initial_layout);
         if this.reopenable {
             let focus_handle = this.focus_handle(cx);
             workspace::register_reopenable_picker(&focus_handle, cx);
@@ -1492,15 +1473,6 @@ impl<D: PickerDelegate> Picker<D> {
                 }),
             )
             .with_sizing_behavior(sizing_behavior)
-            .when_some(self.delegate.indent_size(cx), |list, indent_size| {
-                list.with_decoration(
-                    ui::indent_guides(indent_size, ui::IndentGuideColors::panel(cx))
-                        .with_left_offset(self.delegate.indent_guide_left_offset(cx))
-                        .with_compute_indents_fn(cx.entity(), |picker, range, _window, _cx| {
-                            picker.delegate.visible_depths(range).into()
-                        }),
-                )
-            })
             .flex_grow_1()
             .py_1()
             .track_scroll(&scroll_handle)
