@@ -15,18 +15,11 @@
 //! the editor beside it. Entities live in the `App` rather than in a window, so the project, the
 //! repository and its events reach across exactly as they did before.
 
-use std::{
-    collections::{BTreeMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Context as _;
 use editor::{Direction, Editor, EditorSettings};
 use file_icons::FileIcons;
-use fuzzy::StringMatchCandidate;
 use git::{
     repository::RepoPath,
     status::{DiffStat, FileStatus, StageStatus},
@@ -34,9 +27,9 @@ use git::{
 use git_ui::git_status_icon;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Focusable, IntoElement,
-    ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task, TitlebarOptions,
-    UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowOptions, actions, px,
-    uniform_list,
+    ListSizingBehavior, ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task,
+    TitlebarOptions, UniformListScrollHandle, WeakEntity, Window, WindowBounds, WindowOptions,
+    actions, point, px, uniform_list,
 };
 use language::Point;
 use multi_buffer::MultiBuffer;
@@ -64,7 +57,7 @@ actions!(
 
 /// Bumped on every change, and shown in the status bar so a running build can be identified while
 /// iterating. Remove before this is considered finished.
-const VERSION: &str = "0.14.w1";
+const VERSION: &str = "0.29.w17";
 
 /// What the window opens at the first time. After that the operating system remembers its size
 /// and position, which is most of the point of being a window.
@@ -73,15 +66,29 @@ const DEFAULT_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
     height: px(720.),
 };
 
-/// The list column will not shrink below this, so the diff cannot squeeze the tree out of view.
-const MIN_LIST_WIDTH: Pixels = px(280.);
+/// The list column will not shrink below this, so the diff cannot squeeze the tree out of view,
+/// nor grow past `MAX_LIST_WIDTH` and leave the diff too narrow to read.
+const MIN_LIST_WIDTH: Pixels = px(240.);
+const MAX_LIST_WIDTH: Pixels = px(700.);
 
-/// Upper bound on rows kept after filtering. A repository with more changed files than this is
-/// past the point where scrolling a list helps.
-const MAX_MATCHES: usize = 2_000;
+/// What the list column starts at. Dragging the divider replaces it for the life of the window.
+const DEFAULT_LIST_WIDTH: Pixels = px(340.);
 
-/// How tall the commit message editor is, in lines.
-const COMMIT_EDITOR_LINES: usize = 3;
+/// How many rows the commit box holds.
+const COMMIT_LINES: usize = 5;
+
+/// Carried by the divider drag. Empty because the width is read from the event position, not
+/// accumulated — a drag that starts mid-gesture still lands where the pointer is.
+struct DividerDrag;
+
+/// Rendered while dragging. Nothing is dragged visually; the divider itself moves.
+struct DividerPreview;
+
+impl Render for DividerPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        gpui::Empty
+    }
+}
 
 /// Horizontal step per level of the tree, and where the indent guides sit within a row: the left
 /// edge of its icon plus half an `IconSize::Small` (14px), so the line runs down the middle.
@@ -132,22 +139,30 @@ fn toggle_window(workspace: WeakEntity<Workspace>, project: Entity<Project>, cx:
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Git Changes".into()),
-                    appears_transparent: false,
-                    traffic_light_position: None,
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(12.), px(12.))),
                 }),
                 focus: true,
                 show: true,
                 is_movable: true,
                 kind: gpui::WindowKind::Normal,
                 window_background: cx.theme().window_background_appearance(),
+                // Deliberately tiny. Narrower than about 300px the commit row's buttons start to
+                // clip, but where that line sits is the user's call, not ours.
                 window_min_size: Some(gpui::Size {
-                    width: px(720.),
-                    height: px(400.),
+                    width: px(150.),
+                    height: px(120.),
                 }),
                 window_bounds: Some(WindowBounds::centered(DEFAULT_WINDOW_SIZE, cx)),
                 ..Default::default()
             },
-            |window, cx| cx.new(|cx| IdeaGitWindow::new(workspace, project, window, cx)),
+            |window, cx| {
+                let view = cx.new(|cx| IdeaGitWindow::new(workspace, project, window, cx));
+                // Focusing the window is not the same as focusing something in it; without this
+                // the first keypress goes nowhere until the user clicks.
+                window.focus(&view.focus_handle(cx), cx);
+                view
+            },
         )
         .log_err();
     });
@@ -159,23 +174,16 @@ pub struct IdeaGitWindow {
     /// `None` when the project has no git repository, which shows as an empty list.
     repository: Option<Entity<Repository>>,
     focus_handle: FocusHandle,
-    /// Filters the tree by path. A window has no query to seed and nothing to dismiss, so this is
-    /// a plain single-line editor.
-    filter_editor: Entity<Editor>,
     preview: Entity<DiffPreview>,
     scroll_handle: UniformListScrollHandle,
+    /// Width of the list column. Dragged by the divider, clamped to the two bounds above.
+    list_width: Pixels,
     entries: Vec<ChangedFile>,
-    /// Indices into `entries` surviving the current query.
-    matches: Vec<usize>,
-    /// What the list actually shows: `matches` arranged as a tree, minus anything inside a
-    /// collapsed directory. Rebuilt whenever the matches or the collapsed set change.
+    /// What the list actually shows: `entries` arranged as a tree, minus anything inside a
+    /// collapsed directory. Rebuilt whenever the entries or the collapsed set change.
     rows: Vec<Row>,
     /// Directories the user has collapsed, keyed by their full path. Absent means expanded.
     collapsed_dirs: HashSet<String>,
-    /// While a query is active the tree renders fully expanded, so a match cannot hide inside a
-    /// collapsed directory. `collapsed_dirs` is kept, not cleared, so clearing the query puts the
-    /// tree back the way the user left it.
-    query_is_active: bool,
     selected_index: usize,
     /// Whether the user wants the diff pane at all.
     preview_enabled: bool,
@@ -191,7 +199,6 @@ pub struct IdeaGitWindow {
     signoff: bool,
     skip_hooks: bool,
     commit_menu_handle: PopoverMenuHandle<ContextMenu>,
-    cancel_flag: Arc<AtomicBool>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -203,22 +210,9 @@ impl IdeaGitWindow {
         cx: &mut Context<Self>,
     ) -> Self {
         let repository = project.read(cx).active_repository(cx);
-        let filter_editor = cx.new(|cx| {
-            let mut editor = Editor::single_line(window, cx);
-            editor.set_placeholder_text("Filter changed files…", window, cx);
-            editor
-        });
         let preview = cx.new(|cx| DiffPreview::new(project.clone(), window, cx));
 
-        let mut subscriptions = vec![cx.subscribe_in(
-            &filter_editor,
-            window,
-            |this, _, event: &editor::EditorEvent, window, cx| {
-                if matches!(event, editor::EditorEvent::BufferEdited) {
-                    this.refresh_matches(window, cx);
-                }
-            },
-        )];
+        let mut subscriptions = Vec::new();
 
         // A window outlives the repository it was opened against — a branch switch or a change of
         // active repository would otherwise leave it showing a stale tree forever. A modal never
@@ -233,7 +227,7 @@ impl IdeaGitWindow {
                 }
                 GitStoreEvent::RepositoryUpdated(_, RepositoryEvent::StatusesChanged, true) => {
                     this.reload_entries(cx);
-                    this.refresh_matches(window, cx);
+                    cx.notify();
                 }
                 _ => {}
             },
@@ -244,14 +238,12 @@ impl IdeaGitWindow {
             project,
             repository,
             focus_handle: cx.focus_handle(),
-            filter_editor,
             preview,
             scroll_handle: UniformListScrollHandle::new(),
+            list_width: DEFAULT_LIST_WIDTH,
             entries: Vec::new(),
-            matches: Vec::new(),
             rows: Vec::new(),
             collapsed_dirs: HashSet::new(),
-            query_is_active: false,
             selected_index: 0,
             preview_enabled: true,
             commit_editor: None,
@@ -261,11 +253,9 @@ impl IdeaGitWindow {
             signoff: false,
             skip_hooks: false,
             commit_menu_handle: PopoverMenuHandle::default(),
-            cancel_flag: Arc::new(AtomicBool::new(false)),
             _subscriptions: subscriptions,
         };
         this.reload_entries(cx);
-        this.refresh_matches(window, cx);
         this.open_commit_buffer(window, cx);
         this
     }
@@ -280,7 +270,6 @@ impl IdeaGitWindow {
         self.collapsed_dirs.clear();
         self.selected_index = 0;
         self.reload_entries(cx);
-        self.refresh_matches(window, cx);
         self.open_commit_buffer(window, cx);
     }
 
@@ -308,11 +297,6 @@ impl IdeaGitWindow {
         .detach_and_log_err(cx);
     }
 
-    fn refresh_matches(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let query = self.filter_editor.read(cx).text(cx);
-        self.update_matches(query, window, cx).detach();
-    }
-
     fn selected_row_is_directory(&self) -> bool {
         matches!(
             self.rows.get(self.selected_index),
@@ -331,13 +315,18 @@ impl IdeaGitWindow {
     /// Feeds the preview whatever the selection now points at. A directory has no diff, so the
     /// pane keeps showing the last file rather than blanking as you move through the tree.
     fn update_preview(&mut self, cx: &mut Context<Self>) {
+        // A file that git has never seen is one block of additions, so there is nothing to step
+        // between and the diff pane hides its navigation.
+        let has_hunks = self
+            .selected_entry()
+            .is_some_and(|entry| !entry.status.is_created() && !entry.status.is_untracked());
         match self
             .selected_entry()
             .and_then(|entry| entry.project_path.clone())
         {
             Some(path) => self
                 .preview
-                .update(cx, |preview, cx| preview.show(path, cx)),
+                .update(cx, |preview, cx| preview.show(path, has_hunks, cx)),
             // Only when there is nothing to show at all. A directory row keeps the last file up,
             // rather than blanking the pane as the selection passes over it.
             None if self.rows.is_empty() => {
@@ -347,7 +336,19 @@ impl IdeaGitWindow {
         }
     }
 
-    fn select_next(&mut self, _: &menu::SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
+    /// Whether the commit message currently has focus. The tree's keys — arrows, enter — are
+    /// registered on the window, so without this they fire while typing a message.
+    fn commit_editor_focused(&self, window: &Window, cx: &App) -> bool {
+        self.commit_editor
+            .as_ref()
+            .is_some_and(|editor| editor.focus_handle(cx).contains_focused(window, cx))
+    }
+
+    fn select_next(&mut self, _: &menu::SelectNext, window: &mut Window, cx: &mut Context<Self>) {
+        if self.commit_editor_focused(window, cx) {
+            cx.propagate();
+            return;
+        }
         if self.rows.is_empty() {
             return;
         }
@@ -358,9 +359,13 @@ impl IdeaGitWindow {
     fn select_previous(
         &mut self,
         _: &menu::SelectPrevious,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.commit_editor_focused(window, cx) {
+            cx.propagate();
+            return;
+        }
         if self.rows.is_empty() {
             return;
         }
@@ -380,13 +385,21 @@ impl IdeaGitWindow {
         self.select(0, cx);
     }
 
-    fn select_last(&mut self, _: &menu::SelectLast, _window: &mut Window, cx: &mut Context<Self>) {
+    fn select_last(&mut self, _: &menu::SelectLast, window: &mut Window, cx: &mut Context<Self>) {
+        if self.commit_editor_focused(window, cx) {
+            cx.propagate();
+            return;
+        }
         self.select(self.rows.len().saturating_sub(1), cx);
     }
 
     /// Enter opens a file in the workspace behind, and collapses or expands a directory. The
     /// window stays open either way: unlike a modal, it is not in the way of the editor.
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
+        if self.commit_editor_focused(window, cx) {
+            cx.propagate();
+            return;
+        }
         if self.selected_row_is_directory() {
             self.toggle_selected_directory(cx);
         } else {
@@ -394,14 +407,9 @@ impl IdeaGitWindow {
         }
     }
 
-    /// Escape empties the filter, and closes the window once it is already empty.
-    fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
-        if self.filter_editor.read(cx).text(cx).is_empty() {
-            window.remove_window();
-            return;
-        }
-        self.filter_editor
-            .update(cx, |editor, cx| editor.clear(window, cx));
+    /// Escape closes the window.
+    fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, _cx: &mut Context<Self>) {
+        window.remove_window();
     }
 
     fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -430,16 +438,39 @@ impl IdeaGitWindow {
                         .collect()
                 }),
         )
-        .flex_grow_1()
+        // `Auto`, not the default `Infer`: the list fills the height its column gives it rather
+        // than being measured from its own content, which comes out as nothing inside a flex.
+        .with_sizing_behavior(ListSizingBehavior::Auto)
+        .size_full()
         .py_1()
         .track_scroll(&self.scroll_handle)
     }
 
-    fn render_filter_bar(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    /// The draggable seam between the two columns. Four pixels wide with a resize cursor, and it
+    /// swallows mouse events so a drag that strays over the list does not select a row.
+    fn render_divider(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("idea-git-divider")
+            .w_px()
+            .h_full()
+            .flex_none()
+            .cursor_col_resize()
+            .bg(cx.theme().colors().border)
+            .block_mouse_except_scroll()
+            .on_drag(DividerDrag, |_, _, _, cx| cx.new(|_| DividerPreview))
+            .on_drag_move::<DividerDrag>(cx.listener(
+                |this, event: &gpui::DragMoveEvent<DividerDrag>, _window, cx| {
+                    // Straight from the pointer rather than accumulated from a start offset, so
+                    // the column cannot drift away from the cursor over a long drag.
+                    this.list_width = event.event.position.x.clamp(MIN_LIST_WIDTH, MAX_LIST_WIDTH);
+                    cx.notify();
+                },
+            ))
+    }
+
+    /// The list column's own header: what the repository totals to, and the two controls that
+    /// act on the whole list. Built like the diff pane's header so the two line up.
+    fn render_header(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .child(
                 h_flex()
@@ -448,52 +479,26 @@ impl IdeaGitWindow {
                     .gap_1()
                     .flex_none()
                     .overflow_hidden()
-                    .child(div().flex_1().child(self.filter_editor.clone()))
+                    .justify_end()
                     .children(self.render_header_controls(window, cx)),
             )
             .child(Divider::horizontal())
-    }
-
-    fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let summary = match (self.entries.len(), self.rows.len()) {
-            (0, _) => "No changes".to_string(),
-            (total, _) if !self.query_is_active => format!("{total} changed files"),
-            (total, shown) => format!("{shown} of {total} changed files"),
-        };
-
-        h_flex()
-            .w_full()
-            .px_2()
-            .py_1()
-            .gap_2()
-            .justify_between()
-            .border_t_1()
-            .border_color(cx.theme().colors().border_variant)
-            .child(
-                Label::new(summary)
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            )
-            .child(
-                Label::new(VERSION)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
     }
 }
 
 impl Render for IdeaGitWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let filter_bar = self.render_filter_bar(window, cx).into_any_element();
+        let header = self.render_header(window, cx).into_any_element();
+        let divider = self.render_divider(cx).into_any_element();
         let list = self.render_list(cx).into_any_element();
         let commit_section = self
             .render_commit_section(window, cx)
             .map(IntoElement::into_any_element);
-        let status_bar = self.render_status_bar(cx).into_any_element();
 
         v_flex()
             .key_context("IdeaGit")
             .track_focus(&self.focus_handle)
+            .relative()
             .size_full()
             .bg(cx.theme().colors().background)
             .on_action(cx.listener(Self::select_next))
@@ -502,6 +507,10 @@ impl Render for IdeaGitWindow {
             .on_action(cx.listener(Self::select_last))
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::cancel))
+            // `CommitEditor` binds cmd-enter to this, which is where the message box sends it.
+            .on_action(cx.listener(|this, _: &git::Commit, window, cx| {
+                this.commit(window, cx);
+            }))
             .child(
                 h_flex()
                     .flex_1()
@@ -509,16 +518,22 @@ impl Render for IdeaGitWindow {
                     .child(
                         v_flex()
                             .h_full()
+                            // The settings window's sidebar colour: this column is a list beside
+                            // content, not content itself.
+                            .bg(cx.theme().colors().panel_background)
                             .when(self.preview_enabled, |this| {
-                                this.w(MIN_LIST_WIDTH).flex_none()
+                                // Capped against the window as well as its own bounds: the window
+                                // can now be dragged narrower than the list's stored width.
+                                let width = self.list_width.min(window.viewport_size().width * 0.7);
+                                this.w(width).flex_none()
                             })
                             .when(!self.preview_enabled, |this| this.flex_1())
-                            .child(filter_bar)
+                            .child(header)
                             .child(div().flex_1().min_h_0().child(list))
                             .children(commit_section),
                     )
                     .when(self.preview_enabled, |this| {
-                        this.child(Divider::vertical()).child(
+                        this.child(divider).child(
                             div()
                                 .flex_1()
                                 .min_w_0()
@@ -527,13 +542,20 @@ impl Render for IdeaGitWindow {
                         )
                     }),
             )
-            .child(status_bar)
+            // Floated rather than given a row of its own: it is a build marker, not content.
+            .child(
+                div().absolute().bottom_0().right_1().child(
+                    Label::new(VERSION)
+                        .size(LabelSize::XSmall)
+                        .color(Color::Muted),
+                ),
+            )
     }
 }
 
 impl Focusable for IdeaGitWindow {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.filter_editor.focus_handle(cx)
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -567,22 +589,23 @@ impl IdeaGitWindow {
                 }
             })
             .collect();
+        self.rebuild_rows();
     }
 
-    /// Arranges `matches` into `rows`: one tree holding tracked and untracked files together, so
-    /// a directory containing both shows them side by side rather than twice under two headings.
+    /// Arranges the entries into `rows`: one tree holding tracked and untracked files together,
+    /// so a directory containing both shows them side by side rather than twice under two
+    /// headings.
     fn rebuild_rows(&mut self) {
-        // Sorted by path so rows come out alphabetically: `matches` arrives either in
-        // `cached_status` order or ranked by fuzzy relevance, neither of which means anything
+        // Sorted by path so rows come out alphabetically: `cached_status` order means nothing
         // once the paths are arranged as a tree.
-        let mut matches = self.matches.clone();
-        matches.sort_by(|a, b| match (self.entries.get(*a), self.entries.get(*b)) {
+        let mut order = (0..self.entries.len()).collect::<Vec<_>>();
+        order.sort_by(|a, b| match (self.entries.get(*a), self.entries.get(*b)) {
             (Some(a), Some(b)) => a.display_path.cmp(&b.display_path),
             _ => std::cmp::Ordering::Equal,
         });
 
         let mut root = TreeNode::default();
-        for &index in &matches {
+        for &index in &order {
             let Some(entry) = self.entries.get(index) else {
                 continue;
             };
@@ -590,12 +613,11 @@ impl IdeaGitWindow {
         }
 
         let collapsed_dirs = std::mem::take(&mut self.collapsed_dirs);
-        let query_is_active = self.query_is_active;
         let mut rows = Vec::new();
         root.flatten(
             "",
             0,
-            &|path: &str| !query_is_active && collapsed_dirs.contains(path),
+            &|path: &str| collapsed_dirs.contains(path),
             &mut rows,
         );
 
@@ -646,9 +668,6 @@ impl IdeaGitWindow {
         let Some(Row::Directory { path, .. }) = self.rows.get(self.selected_index) else {
             return;
         };
-        if self.query_is_active {
-            return;
-        }
         let path = path.clone();
         if !self.collapsed_dirs.remove(&path) {
             self.collapsed_dirs.insert(path);
@@ -973,65 +992,6 @@ impl IdeaGitWindow {
         .detach_and_log_err(cx);
     }
 
-    fn cancel_running_filter(&mut self) {
-        self.cancel_flag.store(true, Ordering::SeqCst);
-        self.cancel_flag = Arc::new(AtomicBool::new(false));
-    }
-
-    fn update_matches(
-        &mut self,
-        query: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Task<()> {
-        self.cancel_running_filter();
-        self.query_is_active = !query.is_empty();
-
-        if query.is_empty() {
-            self.matches = (0..self.entries.len().min(MAX_MATCHES)).collect();
-            self.selected_index = 0;
-            self.rebuild_rows();
-            cx.notify();
-            return Task::ready(());
-        }
-
-        let candidates = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(index, entry)| StringMatchCandidate::new(index, &entry.display_path))
-            .collect::<Vec<_>>();
-        let cancel_flag = Arc::clone(&self.cancel_flag);
-        let executor = cx.background_executor().clone();
-
-        cx.spawn_in(window, async move |this, cx| {
-            let matches = fuzzy::match_strings(
-                &candidates,
-                &query,
-                false,
-                true,
-                MAX_MATCHES,
-                &cancel_flag,
-                executor,
-            )
-            .await;
-            if cancel_flag.load(Ordering::SeqCst) {
-                return;
-            }
-
-            this.update(cx, |this, cx| {
-                this.matches = matches
-                    .into_iter()
-                    .map(|entry| entry.candidate_id)
-                    .collect();
-                this.selected_index = 0;
-                this.rebuild_rows();
-                cx.notify();
-            })
-            .log_err();
-        })
-    }
-
     /// The commit button's menu: the options that change what the next commit does. They map
     /// straight onto `CommitOptions`, so nothing here is stored beyond the three flags.
     fn render_commit_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1102,6 +1062,11 @@ impl IdeaGitWindow {
             h_flex()
                 .flex_none()
                 .gap_1p5()
+                .children(self.total_diff_stat().map(|_| {
+                    Label::new("Diff:")
+                        .size(LabelSize::Small)
+                        .color(Color::Muted)
+                }))
                 .children(self.total_diff_stat().map(|total| {
                     DiffStatElement::new(
                         "idea-git-total-diff-stat",
@@ -1177,28 +1142,24 @@ impl IdeaGitWindow {
         Some(
             v_flex()
                 .w_full()
+                .flex_none()
                 .gap_1p5()
-                .p_2()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
+                .pb_2()
                 .children(self.commit_editor.clone().map(|editor| {
                     div()
+                        .key_context("CommitEditor")
                         .w_full()
                         .px_2()
-                        .py_1()
-                        .rounded_sm()
+                        .pt_2()
                         .bg(cx.theme().colors().editor_background)
                         .child(editor)
                 }))
                 .child(
                     h_flex()
                         .w_full()
+                        .flex_none()
                         .gap_1()
-                        .child(
-                            Label::new(format!("{staged} of {} staged", self.entries.len()))
-                                .size(LabelSize::Small)
-                                .color(Color::Muted),
-                        )
+                        .px_2()
                         .child(div().flex_1())
                         .child(
                             action_button(
@@ -1209,7 +1170,7 @@ impl IdeaGitWindow {
                                     "Stage all"
                                 },
                                 !self.entries.is_empty(),
-                                ElevationIndex::Surface,
+                                ButtonStyle::Outlined,
                             )
                             .on_click({
                                 let this = this.clone();
@@ -1220,29 +1181,32 @@ impl IdeaGitWindow {
                                 }
                             }),
                         )
-                        .child(SplitButton::new(
-                            action_button(
-                                ButtonLike::new_rounded_left("idea-git-commit"),
-                                commit_label,
-                                can_commit,
-                                ElevationIndex::ModalSurface,
+                        .child(
+                            SplitButton::new(
+                                action_button(
+                                    ButtonLike::new_rounded_left("idea-git-commit"),
+                                    commit_label,
+                                    can_commit,
+                                    ButtonStyle::Transparent,
+                                )
+                                .on_click({
+                                    let this = this.clone();
+                                    move |_, window, cx| {
+                                        this.update(cx, |this, cx| {
+                                            this.commit(window, cx);
+                                        });
+                                    }
+                                }),
+                                commit_menu,
                             )
-                            .on_click({
-                                let this = this.clone();
-                                move |_, window, cx| {
-                                    this.update(cx, |this, cx| {
-                                        this.commit(window, cx);
-                                    });
-                                }
-                            }),
-                            commit_menu,
-                        ))
+                            .style(ui::SplitButtonStyle::Outlined),
+                        )
                         .child(
                             action_button(
                                 ButtonLike::new("idea-git-push"),
                                 "Push",
                                 can_push,
-                                ElevationIndex::Surface,
+                                ButtonStyle::Outlined,
                             )
                             .on_click(move |_, window, cx| {
                                 this.update(cx, |this, cx| {
@@ -1270,16 +1234,17 @@ impl IdeaGitWindow {
         // selection or an open.
         let stage_checkbox = |state: StageStatus, cx: &mut Context<Self>| {
             let this = cx.entity();
-            Checkbox::new(("stage", ix), stage_toggle_state(state)).on_click(
-                move |_, window, cx| {
+            Checkbox::new(("stage", ix), stage_toggle_state(state))
+                .fill()
+                .elevation(ElevationIndex::Surface)
+                .on_click(move |_, window, cx| {
                     this.update(cx, |this, cx| {
                         this.toggle_staged_for_row(ix, cx);
                         cx.notify();
                     });
                     cx.stop_propagation();
                     window.refresh();
-                },
-            )
+                })
         };
 
         match self.rows.get(ix)? {
@@ -1295,8 +1260,7 @@ impl IdeaGitWindow {
                     row.toggle_state(selected)
                         .on_click(move |_, window, cx| {
                             this.update(cx, |this, cx| {
-                                let filter_input = this.filter_editor.focus_handle(cx);
-                                window.focus(&filter_input, cx);
+                                window.focus(&this.focus_handle, cx);
                                 this.select(ix, cx);
                                 this.toggle_selected_directory(cx);
                             });
@@ -1340,8 +1304,7 @@ impl IdeaGitWindow {
                             this.update(cx, |this, cx| {
                                 // Clicking the preview leaves focus in its editor, where the
                                 // arrow keys move a cursor. Returning to the list takes it back.
-                                let filter_input = this.filter_editor.focus_handle(cx);
-                                window.focus(&filter_input, cx);
+                                window.focus(&this.focus_handle, cx);
 
                                 this.select(ix, cx);
                                 if opening {
@@ -1409,6 +1372,9 @@ struct DiffPreview {
     title: Option<SharedString>,
     /// The directory holding it, shown after the name the way the search modal does.
     subtitle: Option<SharedString>,
+    /// Whether stepping between changes means anything here. A newly added file is a single
+    /// block of additions, so the buttons would move nowhere.
+    has_hunks_to_step_through: bool,
     /// Only one load at a time; selecting a new row cancels the previous one.
     pending_update: Task<()>,
 }
@@ -1450,16 +1416,18 @@ impl DiffPreview {
             current_path: None,
             title: None,
             subtitle: None,
+            has_hunks_to_step_through: false,
             message: Some(NO_SELECTION_MESSAGE.into()),
             pending_update: Task::ready(()),
         }
     }
 
-    fn show(&mut self, path: ProjectPath, cx: &mut Context<Self>) {
+    fn show(&mut self, path: ProjectPath, has_hunks: bool, cx: &mut Context<Self>) {
         if self.current_path.as_ref() == Some(&path) {
             return;
         }
         self.current_path = Some(path.clone());
+        self.has_hunks_to_step_through = has_hunks;
         self.title = path
             .path
             .file_name()
@@ -1512,6 +1480,7 @@ impl DiffPreview {
         self.current_path = None;
         self.title = None;
         self.subtitle = None;
+        self.has_hunks_to_step_through = false;
         self.message = Some(NO_SELECTION_MESSAGE.into());
         self.multibuffer
             .update(cx, |multibuffer, cx| multibuffer.clear(cx));
@@ -1555,6 +1524,7 @@ async fn load_diff(
 
 impl Render for DiffPreview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let steppable = self.message.is_none() && self.has_hunks_to_step_through;
         let body = match self.message.clone() {
             Some(message) => v_flex()
                 .size_full()
@@ -1598,24 +1568,24 @@ impl Render for DiffPreview {
                                     .truncate()
                             })),
                     )
-                    .child(
-                        IconButton::new("idea-git-previous-hunk", IconName::ArrowUp)
-                            .icon_size(IconSize::Small)
-                            .disabled(self.message.is_some())
-                            .tooltip(Tooltip::text("Previous Change"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.go_to_hunk(Direction::Prev, window, cx);
-                            })),
-                    )
-                    .child(
-                        IconButton::new("idea-git-next-hunk", IconName::ArrowDown)
-                            .icon_size(IconSize::Small)
-                            .disabled(self.message.is_some())
-                            .tooltip(Tooltip::text("Next Change"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.go_to_hunk(Direction::Next, window, cx);
-                            })),
-                    ),
+                    .when(steppable, |this| {
+                        this.child(
+                            IconButton::new("idea-git-previous-hunk", IconName::ArrowUp)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Previous Change"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.go_to_hunk(Direction::Prev, window, cx);
+                                })),
+                        )
+                        .child(
+                            IconButton::new("idea-git-next-hunk", IconName::ArrowDown)
+                                .icon_size(IconSize::Small)
+                                .tooltip(Tooltip::text("Next Change"))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.go_to_hunk(Direction::Next, window, cx);
+                                })),
+                        )
+                    }),
             )
             .child(Divider::horizontal())
             .child(div().flex_1().min_h_0().child(body))
@@ -1754,22 +1724,23 @@ fn indent(depth: usize) -> gpui::Div {
 
 /// The commit message editor: a plain multi-line editor over the repository's commit buffer,
 /// sized to its content. Ported from `git_ui`, where the equivalent is crate-private.
+/// An auto-height editor of exactly `lines` rows. `EditorMode::Full` would grow to fill a
+/// container, but brings the whole code-editor apparatus with it — gutter, line numbers, code
+/// actions, the buffer font — so the box stays a fixed number of rows.
+fn commit_editor_mode(lines: usize) -> editor::EditorMode {
+    editor::EditorMode::AutoHeight {
+        min_lines: lines,
+        max_lines: Some(lines),
+    }
+}
+
 fn commit_message_editor(
     commit_buffer: Entity<language::Buffer>,
     window: &mut Window,
     cx: &mut Context<Editor>,
 ) -> Editor {
     let buffer = cx.new(|cx| MultiBuffer::singleton(commit_buffer, cx));
-    let mut editor = Editor::new(
-        editor::EditorMode::AutoHeight {
-            min_lines: COMMIT_EDITOR_LINES,
-            max_lines: Some(COMMIT_EDITOR_LINES),
-        },
-        buffer,
-        None,
-        window,
-        cx,
-    );
+    let mut editor = Editor::new(commit_editor_mode(COMMIT_LINES), buffer, None, window, cx);
     editor.set_use_autoclose(false);
     editor.set_show_gutter(false, cx);
     editor.set_show_wrap_guides(false, cx);
@@ -1782,27 +1753,22 @@ fn commit_message_editor(
 /// `Button` and `ButtonLike` do not agree on their defaults, and the commit button has to be a
 /// `ButtonLike` regardless, since only that half-rounds for a split button.
 ///
-/// The elevation differs by design. A standalone button paints its own background, and
-/// `ElevationIndex::Surface` is what reads against the modal; the commit button sits inside a
-/// `SplitButton`, which paints that same surface across both halves itself, so its own layer is
-/// the modal's and stays invisible underneath.
-fn action_button(
-    base: ButtonLike,
-    label: &str,
-    enabled: bool,
-    elevation: ElevationIndex,
-) -> ButtonLike {
-    base.layer(elevation)
-        .size(ButtonSize::Compact)
+/// `Outlined` is what the rest of Zed's windows use for a button of this weight — bordered rather
+/// than filled. The commit button also sits inside a `SplitButton`, which paints its own surface
+/// across both halves, so it takes `Transparent` to avoid painting twice.
+fn action_button(base: ButtonLike, label: &str, enabled: bool, style: ButtonStyle) -> ButtonLike {
+    base.style(style)
+        .size(ButtonSize::Large)
         .disabled(!enabled)
-        .child(Label::new(label.to_string()).size(LabelSize::Small))
+        .child(Label::new(label.to_string()))
 }
 
 /// The chevron half of a split button. Ported from `git_ui`, where it is crate-private.
 fn split_button_chevron(id: &'static str, menu_open: bool) -> ButtonLike {
-    let size = ui::rems_from_px(20.);
+    // Square, and the same height as `ButtonSize::Large`, so the two halves match.
+    let size = ui::rems_from_px(32.);
     ButtonLike::new_rounded_right(id)
-        .layer(ElevationIndex::ModalSurface)
+        .style(ButtonStyle::Transparent)
         .selected_style(ButtonStyle::Tinted(ui::TintColor::Accent))
         .width(size)
         .height(size.into())
@@ -1812,7 +1778,7 @@ fn split_button_chevron(id: &'static str, menu_open: bool) -> ButtonLike {
             } else {
                 IconName::ChevronDown
             })
-            .size(IconSize::XSmall),
+            .size(IconSize::Small),
         )
 }
 
