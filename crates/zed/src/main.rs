@@ -747,6 +747,7 @@ fn main() {
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);
         idea_search::init(cx);
+        idea_git::init(cx);
         lsp_locations::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
             setup_search_bar: |languages, toolbar, window, cx| {
