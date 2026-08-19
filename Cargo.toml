@@ -106,6 +106,7 @@ members = [
     "crates/http_client_tls",
     "crates/http_proxy",
     "crates/icons",
+    "crates/idea_agent",
     "crates/idea_git",
     "crates/idea_search",
     "crates/image_viewer",
@@ -370,6 +371,7 @@ http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }
+idea_agent = { path = "crates/idea_agent" }
 idea_git = { path = "crates/idea_git" }
 idea_search = { path = "crates/idea_search" }
 image_viewer = { path = "crates/image_viewer" }
