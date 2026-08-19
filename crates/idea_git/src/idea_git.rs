@@ -42,7 +42,8 @@ use settings::Settings as _;
 use ui::{
     ButtonLike, ButtonSize, ButtonStyle, Checkbox, ContextMenu, DiffStat as DiffStatElement,
     Divider, ElevationIndex, Icon, IconButton, IconPosition, Label, ListItem, ListItemSpacing,
-    PopoverMenu, PopoverMenuHandle, SplitButton, ToggleState, Tooltip, h_flex, prelude::*, v_flex,
+    PopoverMenu, PopoverMenuHandle, ScrollAxes, Scrollbars, SplitButton, ToggleState, Tooltip,
+    WithScrollbar, h_flex, prelude::*, v_flex,
 };
 use util::ResultExt as _;
 use workspace::Workspace;
@@ -54,10 +55,6 @@ actions!(
         Toggle
     ]
 );
-
-/// Bumped on every change, and shown in the status bar so a running build can be identified while
-/// iterating. Remove before this is considered finished.
-const VERSION: &str = "0.29.w17";
 
 /// What the window opens at the first time. After that the operating system remembers its size
 /// and position, which is most of the point of being a window.
@@ -74,12 +71,24 @@ const MAX_LIST_WIDTH: Pixels = px(700.);
 /// What the list column starts at. Dragging the divider replaces it for the life of the window.
 const DEFAULT_LIST_WIDTH: Pixels = px(340.);
 
+/// Below this the window stops splitting side by side and stacks the diff under the list instead.
+/// Two columns in a narrow window leave neither wide enough to read.
+const SIDE_BY_SIDE_MIN_WIDTH: Pixels = px(720.);
+
+/// The stacked split's equivalents: how tall the list is above the diff, and its bounds.
+const DEFAULT_LIST_HEIGHT: Pixels = px(280.);
+const MIN_LIST_HEIGHT: Pixels = px(120.);
+const MAX_LIST_HEIGHT: Pixels = px(900.);
+
 /// How many rows the commit box holds.
 const COMMIT_LINES: usize = 5;
 
-/// Carried by the divider drag. Empty because the width is read from the event position, not
+/// Carried by a divider drag. Empty because the size is read from the event position, not
 /// accumulated — a drag that starts mid-gesture still lands where the pointer is.
 struct DividerDrag;
+
+/// The same, for the seam between stacked panes.
+struct StackedDividerDrag;
 
 /// Rendered while dragging. Nothing is dragged visually; the divider itself moves.
 struct DividerPreview;
@@ -173,17 +182,24 @@ pub struct IdeaGitWindow {
     project: Entity<Project>,
     /// `None` when the project has no git repository, which shows as an empty list.
     repository: Option<Entity<Repository>>,
+    /// Held by the tree, not the window: the message box sits outside this handle's subtree, so
+    /// enter and the arrows reach the editor rather than moving the selection.
     focus_handle: FocusHandle,
     preview: Entity<DiffPreview>,
     scroll_handle: UniformListScrollHandle,
-    /// Width of the list column. Dragged by the divider, clamped to the two bounds above.
+    /// Width of the list column when the panes sit side by side, and its height when they are
+    /// stacked. Two values because a width means nothing once the split turns horizontal.
     list_width: Pixels,
+    list_height: Pixels,
     entries: Vec<ChangedFile>,
     /// What the list actually shows: `entries` arranged as a tree, minus anything inside a
     /// collapsed directory. Rebuilt whenever the entries or the collapsed set change.
     rows: Vec<Row>,
     /// Directories the user has collapsed, keyed by their full path. Absent means expanded.
     collapsed_dirs: HashSet<String>,
+    /// Whether a chain of directories with nothing else in it is folded into one row
+    /// (`assets/themes/gruvbox`) or given a row per level.
+    compress_directories: bool,
     selected_index: usize,
     /// Whether the user wants the diff pane at all.
     preview_enabled: bool,
@@ -241,9 +257,11 @@ impl IdeaGitWindow {
             preview,
             scroll_handle: UniformListScrollHandle::new(),
             list_width: DEFAULT_LIST_WIDTH,
+            list_height: DEFAULT_LIST_HEIGHT,
             entries: Vec::new(),
             rows: Vec::new(),
             collapsed_dirs: HashSet::new(),
+            compress_directories: true,
             selected_index: 0,
             preview_enabled: true,
             commit_editor: None,
@@ -297,13 +315,6 @@ impl IdeaGitWindow {
         .detach_and_log_err(cx);
     }
 
-    fn selected_row_is_directory(&self) -> bool {
-        matches!(
-            self.rows.get(self.selected_index),
-            Some(Row::Directory { .. })
-        )
-    }
-
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {
         self.selected_index = index.min(self.rows.len().saturating_sub(1));
         self.scroll_handle
@@ -336,36 +347,19 @@ impl IdeaGitWindow {
         }
     }
 
-    /// Whether the commit message currently has focus. The tree's keys — arrows, enter — are
-    /// registered on the window, so without this they fire while typing a message.
-    fn commit_editor_focused(&self, window: &Window, cx: &App) -> bool {
-        self.commit_editor
-            .as_ref()
-            .is_some_and(|editor| editor.focus_handle(cx).contains_focused(window, cx))
-    }
-
-    fn select_next(&mut self, _: &menu::SelectNext, window: &mut Window, cx: &mut Context<Self>) {
-        if self.commit_editor_focused(window, cx) {
-            cx.propagate();
-            return;
-        }
+    fn select_next(&mut self, _: &menu::SelectNext, _window: &mut Window, cx: &mut Context<Self>) {
         if self.rows.is_empty() {
             return;
         }
-        let next = (self.selected_index + 1) % self.rows.len();
-        self.select(next, cx);
+        self.select((self.selected_index + 1) % self.rows.len(), cx);
     }
 
     fn select_previous(
         &mut self,
         _: &menu::SelectPrevious,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.commit_editor_focused(window, cx) {
-            cx.propagate();
-            return;
-        }
         if self.rows.is_empty() {
             return;
         }
@@ -385,22 +379,17 @@ impl IdeaGitWindow {
         self.select(0, cx);
     }
 
-    fn select_last(&mut self, _: &menu::SelectLast, window: &mut Window, cx: &mut Context<Self>) {
-        if self.commit_editor_focused(window, cx) {
-            cx.propagate();
-            return;
-        }
+    fn select_last(&mut self, _: &menu::SelectLast, _window: &mut Window, cx: &mut Context<Self>) {
         self.select(self.rows.len().saturating_sub(1), cx);
     }
 
     /// Enter opens a file in the workspace behind, and collapses or expands a directory. The
     /// window stays open either way: unlike a modal, it is not in the way of the editor.
     fn confirm(&mut self, _: &menu::Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        if self.commit_editor_focused(window, cx) {
-            cx.propagate();
-            return;
-        }
-        if self.selected_row_is_directory() {
+        if matches!(
+            self.rows.get(self.selected_index),
+            Some(Row::Directory { .. })
+        ) {
             self.toggle_selected_directory(cx);
         } else {
             self.open_selected(window, cx);
@@ -434,7 +423,9 @@ impl IdeaGitWindow {
                 )
                 .with_compute_indents_fn(cx.entity(), |this, range, _window, _cx| {
                     range
-                        .filter_map(|index| this.rows.get(index).map(Row::depth))
+                        .filter_map(|index| match this.rows.get(index)? {
+                            Row::Directory { depth, .. } | Row::File { depth, .. } => Some(*depth),
+                        })
                         .collect()
                 }),
         )
@@ -446,26 +437,46 @@ impl IdeaGitWindow {
         .track_scroll(&self.scroll_handle)
     }
 
-    /// The draggable seam between the two columns. Four pixels wide with a resize cursor, and it
-    /// swallows mouse events so a drag that strays over the list does not select a row.
-    fn render_divider(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The draggable seam between the two panes. A hairline with a resize cursor, swallowing
+    /// mouse events so a drag that strays over the list does not select a row.
+    fn render_divider(&self, side_by_side: bool, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("idea-git-divider")
-            .w_px()
-            .h_full()
             .flex_none()
-            .cursor_col_resize()
             .bg(cx.theme().colors().border)
             .block_mouse_except_scroll()
-            .on_drag(DividerDrag, |_, _, _, cx| cx.new(|_| DividerPreview))
-            .on_drag_move::<DividerDrag>(cx.listener(
-                |this, event: &gpui::DragMoveEvent<DividerDrag>, _window, cx| {
-                    // Straight from the pointer rather than accumulated from a start offset, so
-                    // the column cannot drift away from the cursor over a long drag.
-                    this.list_width = event.event.position.x.clamp(MIN_LIST_WIDTH, MAX_LIST_WIDTH);
-                    cx.notify();
-                },
-            ))
+            .map(|this| {
+                if side_by_side {
+                    this.w_px()
+                        .h_full()
+                        .cursor_col_resize()
+                        .on_drag(DividerDrag, |_, _, _, cx| cx.new(|_| DividerPreview))
+                        .on_drag_move::<DividerDrag>(cx.listener(
+                            |this, event: &gpui::DragMoveEvent<DividerDrag>, _window, cx| {
+                                // Straight from the pointer rather than accumulated from a start
+                                // offset, so the pane cannot drift away from the cursor.
+                                this.list_width =
+                                    event.event.position.x.clamp(MIN_LIST_WIDTH, MAX_LIST_WIDTH);
+                                cx.notify();
+                            },
+                        ))
+                } else {
+                    this.h_px()
+                        .w_full()
+                        .cursor_row_resize()
+                        .on_drag(StackedDividerDrag, |_, _, _, cx| cx.new(|_| DividerPreview))
+                        .on_drag_move::<StackedDividerDrag>(cx.listener(
+                            |this, event: &gpui::DragMoveEvent<StackedDividerDrag>, _window, cx| {
+                                this.list_height = event
+                                    .event
+                                    .position
+                                    .y
+                                    .clamp(MIN_LIST_HEIGHT, MAX_LIST_HEIGHT);
+                                cx.notify();
+                            },
+                        ))
+                }
+            })
     }
 
     /// The list column's own header: what the repository totals to, and the two controls that
@@ -484,82 +495,7 @@ impl IdeaGitWindow {
             )
             .child(Divider::horizontal())
     }
-}
 
-impl Render for IdeaGitWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let header = self.render_header(window, cx).into_any_element();
-        let divider = self.render_divider(cx).into_any_element();
-        let list = self.render_list(cx).into_any_element();
-        let commit_section = self
-            .render_commit_section(window, cx)
-            .map(IntoElement::into_any_element);
-
-        v_flex()
-            .key_context("IdeaGit")
-            .track_focus(&self.focus_handle)
-            .relative()
-            .size_full()
-            .bg(cx.theme().colors().background)
-            .on_action(cx.listener(Self::select_next))
-            .on_action(cx.listener(Self::select_previous))
-            .on_action(cx.listener(Self::select_first))
-            .on_action(cx.listener(Self::select_last))
-            .on_action(cx.listener(Self::confirm))
-            .on_action(cx.listener(Self::cancel))
-            // `CommitEditor` binds cmd-enter to this, which is where the message box sends it.
-            .on_action(cx.listener(|this, _: &git::Commit, window, cx| {
-                this.commit(window, cx);
-            }))
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(
-                        v_flex()
-                            .h_full()
-                            // The settings window's sidebar colour: this column is a list beside
-                            // content, not content itself.
-                            .bg(cx.theme().colors().panel_background)
-                            .when(self.preview_enabled, |this| {
-                                // Capped against the window as well as its own bounds: the window
-                                // can now be dragged narrower than the list's stored width.
-                                let width = self.list_width.min(window.viewport_size().width * 0.7);
-                                this.w(width).flex_none()
-                            })
-                            .when(!self.preview_enabled, |this| this.flex_1())
-                            .child(header)
-                            .child(div().flex_1().min_h_0().child(list))
-                            .children(commit_section),
-                    )
-                    .when(self.preview_enabled, |this| {
-                        this.child(divider).child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .h_full()
-                                .child(self.preview.clone()),
-                        )
-                    }),
-            )
-            // Floated rather than given a row of its own: it is a build marker, not content.
-            .child(
-                div().absolute().bottom_0().right_1().child(
-                    Label::new(VERSION)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                ),
-            )
-    }
-}
-
-impl Focusable for IdeaGitWindow {
-    fn focus_handle(&self, _cx: &App) -> FocusHandle {
-        self.focus_handle.clone()
-    }
-}
-
-impl IdeaGitWindow {
     fn reload_entries(&mut self, cx: &mut App) {
         let Some(repository) = self.repository.clone() else {
             self.entries.clear();
@@ -612,11 +548,13 @@ impl IdeaGitWindow {
             root.insert(&entry.display_path.split('/').collect::<Vec<_>>(), index);
         }
 
+        let compress = self.compress_directories;
         let collapsed_dirs = std::mem::take(&mut self.collapsed_dirs);
         let mut rows = Vec::new();
         root.flatten(
             "",
             0,
+            compress,
             &|path: &str| collapsed_dirs.contains(path),
             &mut rows,
         );
@@ -627,27 +565,24 @@ impl IdeaGitWindow {
     }
 
     /// Every file under `directory`, which is what a directory's checkbox stages or unstages.
-    fn files_under(&self, directory: &str) -> Vec<&ChangedFile> {
+    fn files_under<'a>(&'a self, directory: &str) -> impl Iterator<Item = &'a ChangedFile> {
         let prefix = format!("{directory}/");
         self.entries
             .iter()
-            .filter(|entry| entry.display_path.starts_with(&prefix))
-            .collect()
+            .filter(move |entry| entry.display_path.starts_with(&prefix))
     }
 
     /// A directory is staged when every file under it is, unstaged when none are, and mixed
     /// otherwise — which is what the checkbox's indeterminate state shows.
     fn directory_stage_status(&self, directory: &str) -> StageStatus {
-        let mut staged = 0;
-        let mut total = 0;
-        for entry in self.files_under(directory) {
-            total += 1;
-            match entry.status.staging() {
-                StageStatus::Staged => staged += 1,
-                StageStatus::PartiallyStaged => return StageStatus::PartiallyStaged,
-                StageStatus::Unstaged => {}
-            }
-        }
+        let (staged, total) = self
+            .files_under(directory)
+            .fold((0, 0), |(staged, total), entry| {
+                (
+                    staged + entry.status.staging().has_staged() as usize,
+                    total + 1,
+                )
+            });
         match staged {
             0 => StageStatus::Unstaged,
             _ if staged == total => StageStatus::Staged,
@@ -692,32 +627,22 @@ impl IdeaGitWindow {
     /// Collapses every directory, or expands every directory when none are left expanded, so one
     /// button covers both directions.
     fn toggle_all_directories(&mut self, cx: &mut Context<Self>) {
-        if self.any_directory_expanded() {
-            // Only the directories currently shown are known here, and collapsing an outer one
-            // hides the inner ones before they can be collected, so this walks until it settles.
-            loop {
-                let expanded = self
-                    .rows
-                    .iter()
-                    .filter_map(|row| match row {
-                        Row::Directory {
-                            path,
-                            collapsed: false,
-                            ..
-                        } => Some(path.clone()),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                if expanded.is_empty() {
-                    break;
-                }
-                self.collapsed_dirs.extend(expanded);
-                self.rebuild_rows();
-            }
+        self.collapsed_dirs = if self.any_directory_expanded() {
+            // Taken from the paths rather than the visible rows: collapsing an outer directory
+            // hides the inner ones, so reading rows would only ever reach the top level.
+            self.entries
+                .iter()
+                .flat_map(|entry| {
+                    entry
+                        .display_path
+                        .match_indices('/')
+                        .map(|(end, _)| entry.display_path[..end].to_string())
+                })
+                .collect()
         } else {
-            self.collapsed_dirs.clear();
-            self.rebuild_rows();
-        }
+            HashSet::new()
+        };
+        self.rebuild_rows();
         cx.notify();
     }
 
@@ -755,12 +680,6 @@ impl IdeaGitWindow {
         });
         cx.spawn(async move |_, _| task.await)
             .detach_and_log_err(cx);
-    }
-
-    fn has_staged_changes(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|entry| entry.status.staging().has_staged())
     }
 
     /// Stages everything, or unstages everything once it all is, so one button covers both.
@@ -801,7 +720,6 @@ impl IdeaGitWindow {
                 let staged = !self.directory_stage_status(&path).has_staged();
                 let paths = self
                     .files_under(&path)
-                    .into_iter()
                     .map(|entry| entry.repo_path.clone())
                     .collect();
                 (paths, staged)
@@ -830,7 +748,11 @@ impl IdeaGitWindow {
             return;
         }
 
-        let unstaged_tracked = (!self.has_staged_changes())
+        let nothing_staged = !self
+            .entries
+            .iter()
+            .any(|entry| entry.status.staging().has_staged());
+        let unstaged_tracked = nothing_staged
             .then(|| {
                 self.entries
                     .iter()
@@ -1055,6 +977,7 @@ impl IdeaGitWindow {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let collapse_all = self.any_directory_expanded();
+        let compress_directories = self.compress_directories;
         let preview_enabled = self.preview_enabled;
         let this = cx.entity();
 
@@ -1074,6 +997,26 @@ impl IdeaGitWindow {
                         total.deleted as usize,
                     )
                 }))
+                .child(
+                    IconButton::new("idea-git-compress-directories", IconName::ListTree)
+                        .icon_size(IconSize::Small)
+                        .toggle_state(!compress_directories)
+                        .tooltip(Tooltip::text(if compress_directories {
+                            "Show Every Directory"
+                        } else {
+                            "Fold Single-Child Directories"
+                        }))
+                        .on_click({
+                            let this = this.clone();
+                            move |_, _window, cx| {
+                                this.update(cx, |this, cx| {
+                                    this.compress_directories = !this.compress_directories;
+                                    this.rebuild_rows();
+                                    cx.notify();
+                                });
+                            }
+                        }),
+                )
                 .child(
                     IconButton::new(
                         "idea-git-collapse-all",
@@ -1355,6 +1298,101 @@ impl IdeaGitWindow {
     }
 }
 
+impl Render for IdeaGitWindow {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Side by side while there is room for both, stacked when there is not — the same call a
+        // media query makes, decided from the viewport each frame. Purely about width: whether
+        // there is a diff pane at all is a separate question, and folding the two together left
+        // the list pinned to a stacked height with nothing beneath it.
+        let side_by_side = window.viewport_size().width >= SIDE_BY_SIDE_MIN_WIDTH;
+        let split = self.preview_enabled;
+
+        let header = self.render_header(window, cx).into_any_element();
+        let list = self.render_list(cx).into_any_element();
+        let divider = self.render_divider(side_by_side, cx).into_any_element();
+        // Stacked with a diff pane, the window's height is already split between tree and diff;
+        // a message box and its buttons on top of that leaves too little of either. Toggling the
+        // preview off brings them back, which is also how the tree gets the whole window.
+        let commit_section = (side_by_side || !split)
+            .then(|| self.render_commit_section(window, cx))
+            .flatten()
+            .map(IntoElement::into_any_element);
+
+        let tree = div()
+            .id("idea-git-tree")
+            .track_focus(&self.focus_handle)
+            .flex_1()
+            .min_h_0()
+            .on_action(cx.listener(Self::select_next))
+            .on_action(cx.listener(Self::select_previous))
+            .on_action(cx.listener(Self::select_first))
+            .on_action(cx.listener(Self::select_last))
+            .on_action(cx.listener(Self::confirm))
+            .child(list)
+            .custom_scrollbars(
+                Scrollbars::new(ScrollAxes::Vertical).tracked_scroll_handle(&self.scroll_handle),
+                window,
+                cx,
+            );
+
+        let list_column = v_flex()
+            // The settings window's sidebar colour: this column is a list beside content, not
+            // content itself.
+            .bg(cx.theme().colors().panel_background)
+            // Sized against the pane it shares the window with, and only then. On its own it
+            // fills the window.
+            .map(|this| match (split, side_by_side) {
+                (false, _) => this.size_full().flex_1().min_h_0(),
+                // Capped against the window as well as its own bounds: the window can be dragged
+                // smaller than the list's stored size.
+                (true, true) => {
+                    let width = self.list_width.min(window.viewport_size().width * 0.7);
+                    this.h_full().w(width).flex_none()
+                }
+                (true, false) => {
+                    let height = self.list_height.min(window.viewport_size().height * 0.7);
+                    this.w_full().h(height).flex_none()
+                }
+            })
+            .child(header)
+            .child(tree)
+            .children(commit_section);
+
+        let preview = div()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(self.preview.clone());
+
+        v_flex()
+            .key_context("IdeaGit")
+            .relative()
+            .size_full()
+            .bg(cx.theme().colors().background)
+            .on_action(cx.listener(Self::cancel))
+            // `CommitEditor` binds cmd-enter to this, which is where the message box sends it.
+            .on_action(cx.listener(|this, _: &git::Commit, window, cx| {
+                this.commit(window, cx);
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .when(side_by_side, |this| this.flex_row())
+                    .when(!side_by_side, |this| this.flex_col())
+                    .child(list_column)
+                    .when(split, |this| this.child(divider).child(preview)),
+            )
+    }
+}
+
+impl Focusable for IdeaGitWindow {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
 /// The diff of one file, shown whole rather than as a list of hunks.
 ///
 /// One file, whole, rather than the project-wide multibuffer of hunks Zed's diff views use: the
@@ -1486,9 +1524,7 @@ impl DiffPreview {
             .update(cx, |multibuffer, cx| multibuffer.clear(cx));
         cx.notify();
     }
-}
 
-impl DiffPreview {
     /// Moves the cursor to the next or previous changed block, wrapping at the ends. The editor
     /// scrolls to follow it, which is the whole point: the preview shows the entire file, so the
     /// changes in a long one can be far apart.
@@ -1611,14 +1647,6 @@ enum Row {
     },
 }
 
-impl Row {
-    fn depth(&self) -> usize {
-        match self {
-            Row::Directory { depth, .. } | Row::File { depth, .. } => *depth,
-        }
-    }
-}
-
 #[derive(Default)]
 struct TreeNode {
     children: BTreeMap<String, TreeNode>,
@@ -1639,12 +1667,14 @@ impl TreeNode {
     }
 
     /// Appends this node's rows, directories before files, skipping the contents of anything
-    /// collapsed. A chain of directories with a single child and no files of its own is folded
-    /// into one row, so `assets/themes/gruvbox` is one line rather than three.
+    /// collapsed. With `compress`, a chain of directories holding a single child and no files of
+    /// its own becomes one row, so `assets/themes/gruvbox` is one line rather than three;
+    /// without it, every directory gets a level of its own.
     fn flatten(
         &self,
         prefix: &str,
         depth: usize,
+        compress: bool,
         collapsed: &dyn Fn(&str) -> bool,
         rows: &mut Vec<Row>,
     ) {
@@ -1652,7 +1682,7 @@ impl TreeNode {
             let mut path = join_path(prefix, name);
             let mut label = name.clone();
             let mut child = child;
-            while child.files.is_empty() && child.children.len() == 1 {
+            while compress && child.files.is_empty() && child.children.len() == 1 {
                 let (name, only_child) = child
                     .children
                     .iter()
@@ -1671,7 +1701,7 @@ impl TreeNode {
                 collapsed: is_collapsed,
             });
             if !is_collapsed {
-                child.flatten(&path, depth + 1, collapsed, rows);
+                child.flatten(&path, depth + 1, compress, collapsed, rows);
             }
         }
 
@@ -1724,13 +1754,20 @@ fn indent(depth: usize) -> gpui::Div {
 
 /// The commit message editor: a plain multi-line editor over the repository's commit buffer,
 /// sized to its content. Ported from `git_ui`, where the equivalent is crate-private.
-/// An auto-height editor of exactly `lines` rows. `EditorMode::Full` would grow to fill a
-/// container, but brings the whole code-editor apparatus with it — gutter, line numbers, code
-/// actions, the buffer font — so the box stays a fixed number of rows.
+/// An editor of exactly `lines` rows. `EditorMode::Full` would grow to fill a container, but
+/// brings the whole code-editor apparatus with it — gutter, line numbers, code actions, the
+/// buffer font — so the box stays a fixed number of rows.
+///
+/// One row is `SingleLine` rather than a one-row `AutoHeight`, which would still accept newlines
+/// and scroll them out of sight. `SingleLine` refuses them at the editor.
 fn commit_editor_mode(lines: usize) -> editor::EditorMode {
-    editor::EditorMode::AutoHeight {
-        min_lines: lines,
-        max_lines: Some(lines),
+    if lines <= 1 {
+        editor::EditorMode::SingleLine
+    } else {
+        editor::EditorMode::AutoHeight {
+            min_lines: lines,
+            max_lines: Some(lines),
+        }
     }
 }
 
@@ -1798,6 +1835,10 @@ mod tests {
     /// Renders what the list would show, one string per row, indented by depth. Directories end
     /// in `/`; files show their full path so a misplaced row is obvious.
     fn outline(paths: &[&str], collapsed: &[&str]) -> Vec<String> {
+        outline_with(paths, collapsed, true)
+    }
+
+    fn outline_with(paths: &[&str], collapsed: &[&str], compress: bool) -> Vec<String> {
         let mut root = TreeNode::default();
         let mut indices = (0..paths.len()).collect::<Vec<_>>();
         indices.sort_by_key(|index| paths[*index]);
@@ -1810,7 +1851,7 @@ mod tests {
             .map(|path| path.to_string())
             .collect::<HashSet<_>>();
         let mut rows = Vec::new();
-        root.flatten("", 0, &|path| collapsed.contains(path), &mut rows);
+        root.flatten("", 0, compress, &|path| collapsed.contains(path), &mut rows);
 
         rows.iter()
             .map(|row| {
@@ -1859,6 +1900,39 @@ mod tests {
         assert_eq!(
             outline(&["b.rs", "a/inner.rs", "a.rs"], &[]),
             vec!["a/", "  a/inner.rs", "a.rs", "b.rs"]
+        );
+    }
+
+    /// Without compression every directory gets a row, and the files under it move one level
+    /// deeper for each.
+    #[test]
+    fn every_directory_gets_a_level_when_compression_is_off() {
+        let paths = ["assets/themes/gruvbox/LICENSE"];
+        assert_eq!(
+            outline_with(&paths, &[], false),
+            vec![
+                "assets/",
+                "  themes/",
+                "    gruvbox/",
+                "      assets/themes/gruvbox/LICENSE",
+            ]
+        );
+        assert_eq!(
+            outline_with(&paths, &[], true),
+            vec!["assets/themes/gruvbox/", "  assets/themes/gruvbox/LICENSE",]
+        );
+    }
+
+    /// Uncompressed, each level is collapsible on its own — the whole point of the mode.
+    #[test]
+    fn an_intermediate_directory_collapses_when_compression_is_off() {
+        assert_eq!(
+            outline_with(
+                &["assets/themes/gruvbox/LICENSE"],
+                &["assets/themes"],
+                false
+            ),
+            vec!["assets/", "  themes/"]
         );
     }
 
