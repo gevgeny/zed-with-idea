@@ -245,24 +245,6 @@ impl ThreadsArchiveView {
         self.selection = None;
     }
 
-    /// Highlights the row for `thread_id`, returning whether the list currently holds one — it
-    /// may not, since the history loads in the background.
-    ///
-    /// The archive is a search view and normally only highlights what the keyboard has moved to,
-    /// so a host that opens threads from it — rather than letting the sidebar do so — has no way
-    /// to show which one is open.
-    pub fn select_thread(&mut self, thread_id: &ThreadId, cx: &mut Context<Self>) -> bool {
-        let found = self.items.iter().position(|item| {
-            matches!(item, ArchiveListItem::Entry { thread, .. } if thread.thread_id == *thread_id)
-        });
-        if found.is_none() {
-            return false;
-        }
-        self.selection = found;
-        cx.notify();
-        true
-    }
-
     pub fn mark_restoring(&mut self, thread_id: &ThreadId, cx: &mut Context<Self>) {
         self.restoring.insert(*thread_id);
         cx.notify();
