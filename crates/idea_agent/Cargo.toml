@@ -15,7 +15,7 @@ doctest = false
 [dependencies]
 agent_ui.workspace = true
 gpui.workspace = true
-project.workspace = true
+sidebar.workspace = true
 theme.workspace = true
 ui.workspace = true
 util.workspace = true

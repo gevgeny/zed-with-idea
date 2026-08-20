@@ -3,30 +3,25 @@
 //! Opened with cmd-alt-0, or ctrl-alt-9 elsewhere: ctrl-alt-0 is already
 //! `workspace::ResetActiveDockSize` on those platforms.
 //!
-//! Kept in its own crate so it stays mergeable with upstream Zed. Unlike the git window, nothing
-//! here reimplements the panel: `AgentPanel` is a view, and a view can be rendered by any window,
-//! so this hosts the very entity the dock already owns. The two show the same conversation
-//! because they are the same panel.
+//! Kept in its own crate so it stays mergeable with upstream Zed. Nothing here reimplements
+//! either half of what it shows: `AgentPanel` and `Sidebar` are views, and a view can be rendered
+//! by any window, so this hosts the panel the dock already owns beside a sidebar of its own.
 //!
 //! Rendering one entity in two windows is safe in a way that rendering it twice in one window is
 //! not: gpui keys element state by `(GlobalElementId, TypeId)` per window, and tracks focus per
 //! window, so the dock's copy and this one do not collide.
 
-use agent_ui::{
-    Agent, AgentPanel, AgentThreadSource, ThreadId,
-    thread_metadata_store::ThreadMetadata,
-    threads_archive_view::{ThreadsArchiveView, ThreadsArchiveViewEvent},
-};
+use agent_ui::AgentPanel;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement, Pixels, Render,
     Styled, Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions,
     actions, point, px,
 };
-use project::Project;
+use sidebar::Sidebar;
 use theme::ActiveTheme as _;
 use ui::{IconButton, Tooltip, h_flex, prelude::*, v_flex};
 use util::ResultExt as _;
-use workspace::{MultiWorkspace, Workspace, dock::Dock};
+use workspace::{MultiWorkspace, SidebarHandle as _, Workspace, dock::Dock};
 
 actions!(
     idea_agent,
@@ -39,7 +34,7 @@ actions!(
 /// What the window opens at the first time. After that the operating system remembers its size
 /// and position, which is most of the point of being a window.
 const DEFAULT_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
-    width: px(520.),
+    width: px(820.),
     height: px(820.),
 };
 
@@ -47,6 +42,10 @@ const DEFAULT_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
 /// transparent. The tab row is ours, so padding it leaves the hosted views alone — padding the
 /// window itself would have indented everything they draw.
 const TRAFFIC_LIGHT_INSET: Pixels = px(76.);
+
+/// Bumped on every change, and shown in the header so a running build can be identified while
+/// iterating. Remove before this is considered finished.
+const VERSION: &str = "0.2.p2";
 
 /// Where the threads list sits relative to the conversation.
 #[derive(PartialEq, Clone, Copy)]
@@ -56,8 +55,8 @@ enum ThreadsSide {
     Right,
 }
 
-/// Width of the threads pane, and the bounds the divider can drag it between.
-const DEFAULT_THREADS_WIDTH: Pixels = px(280.);
+/// The bounds the divider can drag the sidebar between. Its width is the sidebar's own — it
+/// renders itself at whatever `set_width` was last given.
 const MIN_THREADS_WIDTH: Pixels = px(180.);
 const MAX_THREADS_WIDTH: Pixels = px(560.);
 
@@ -86,23 +85,26 @@ fn register(workspace: &mut Workspace, _window: Option<&mut Window>, _: &mut Con
         let Some(panel) = workspace.panel::<AgentPanel>(cx) else {
             return;
         };
-        let project = workspace.project().clone();
+        let Some(multi_workspace) = workspace
+            .multi_workspace()
+            .and_then(|multi_workspace| multi_workspace.upgrade())
+        else {
+            return;
+        };
         // Looked up here, while the workspace is already in hand. An action handler runs inside
         // `workspace.update`, so anything that leases it again panics.
         let position = workspace::dock::PanelHandle::position(&panel, window, cx);
         let dock = workspace.dock_at_position(position).downgrade();
-        let handle = cx.entity().downgrade();
-        toggle_window(project, panel, handle, dock, window, cx);
+        toggle_window(multi_workspace, panel, dock, window, cx);
     });
 }
 
-/// Opens the window for this project, or brings the existing one forward. One window per project,
-/// found by asking the app for its windows and matching on the project entity — the same lookup
-/// the settings window uses to keep itself unique.
+/// Opens the window for this editor window, or brings the existing one forward. One agent window
+/// per editor window, found by asking the app for its windows and matching on the multi-workspace
+/// — the same lookup the settings window uses to keep itself unique.
 fn toggle_window(
-    project: Entity<Project>,
+    multi_workspace: Entity<MultiWorkspace>,
     panel: Entity<AgentPanel>,
-    workspace: WeakEntity<Workspace>,
     dock: WeakEntity<Dock>,
     window: &mut Window,
     cx: &mut App,
@@ -111,7 +113,11 @@ fn toggle_window(
         .windows()
         .into_iter()
         .filter_map(|window| window.downcast::<IdeaAgentWindow>())
-        .find(|window| window.read(cx).is_ok_and(|agent| agent.project == project));
+        .find(|window| {
+            window
+                .read(cx)
+                .is_ok_and(|agent| agent.multi_workspace == multi_workspace)
+        });
 
     if let Some(existing) = existing {
         existing
@@ -148,7 +154,7 @@ fn toggle_window(
                 ..Default::default()
             },
             |window, cx| {
-                let view = cx.new(|cx| IdeaAgentWindow::new(project, panel, workspace, window, cx));
+                let view = cx.new(|cx| IdeaAgentWindow::new(multi_workspace, panel, window, cx));
                 // Focusing the window is not the same as focusing something in it; without this
                 // the first keypress goes nowhere until the user clicks.
                 window.focus(&view.focus_handle(cx), cx);
@@ -162,205 +168,66 @@ fn toggle_window(
 /// A host for two of Zed's own views, and nothing else. Everything the window can do, they
 /// already did.
 pub struct IdeaAgentWindow {
-    /// Only to tell one window from another when the action fires again.
-    project: Entity<Project>,
-    /// The dock's own panel, not a copy: the window and the dock show the same conversation.
-    /// Swapped when a thread moves us to another workspace, since panels belong to one.
+    /// The editor window this one belongs to. Also what tells one agent window from another when
+    /// the action fires again.
+    multi_workspace: Entity<MultiWorkspace>,
+    /// The panel of whichever workspace the editor window is showing, not a copy of it: this
+    /// window and the dock show the same conversation. Swapped when the sidebar moves the editor
+    /// to another workspace, since panels belong to one.
     panel: Entity<AgentPanel>,
-    /// Kept so a thread can be loaded into whichever workspace it belongs to.
-    workspace: WeakEntity<Workspace>,
-    /// Ours, unlike the panel. The sidebar builds its archive on demand and drops it on close,
-    /// so there is no shared instance to borrow — only the code is reused, not the state.
-    threads: Entity<ThreadsArchiveView>,
+    /// Ours, unlike the panel — the editor window's own sidebar is registered as *the* sidebar of
+    /// its multi-workspace, and its `ListState` measures itself against that window's width. Only
+    /// the instance is separate; both read the same stores, so live status and ordering match.
+    threads: Entity<Sidebar>,
     threads_side: ThreadsSide,
-    /// Which thread the list is currently highlighting, so the panel is only pushed at it when
-    /// the answer actually changes.
-    highlighted_thread: Option<ThreadId>,
-    threads_width: Pixels,
-    _threads_subscriptions: [Subscription; 2],
+    /// Redraws us when the panel swaps its conversation — it loads threads in the background — and
+    /// when the sidebar moves the editor to another workspace, which is when the panel we render
+    /// stops being the right one. Rebuilt whenever the panel itself is swapped.
+    _panel_subscription: Subscription,
+    _multi_workspace_subscription: Subscription,
 }
 
 impl IdeaAgentWindow {
     fn new(
-        project: Entity<Project>,
+        multi_workspace: Entity<MultiWorkspace>,
         panel: Entity<AgentPanel>,
-        workspace: WeakEntity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let threads = cx.new(|cx| {
-            ThreadsArchiveView::new(
-                workspace.clone(),
-                panel.read(cx).connection_store().downgrade(),
-                project.read(cx).agent_server_store().downgrade(),
-                window,
-                cx,
-            )
-        });
+        let threads = cx.new(|cx| Sidebar::new(multi_workspace.clone(), window, cx));
 
-        let _threads_subscription = cx.subscribe_in(
-            &threads,
-            window,
-            |this, _, event: &ThreadsArchiveViewEvent, window, cx| match event {
-                // The archive asks to be closed; here that means hiding the pane.
-                ThreadsArchiveViewEvent::Close => {
-                    this.threads_side = ThreadsSide::Hidden;
-                    cx.notify();
-                }
-                // Without this a clicked thread spins forever: the archive only announces the
-                // choice, and the sidebar's own handler routes it into its private state.
-                ThreadsArchiveViewEvent::Activate { thread } => {
-                    this.activate_thread(thread.clone(), window, cx);
-                }
-                _ => {}
-            },
-        );
-
-        // The archive's history arrives in the background, and it notifies itself rather than us
-        // when it does. Without this the highlight would have nothing to attach to on the first
-        // frame and would never be retried. Safe against looping: once the row is found, the
-        // sync leaves early and stops notifying.
-        let _redraw_on_history = cx.observe(&threads, |_, _, cx| cx.notify());
+        // Deliberately not `register_sidebar`: that would make this instance *the* sidebar of the
+        // editor window, replacing the one already there.
+        let _multi_workspace_subscription =
+            cx.observe(&multi_workspace, |this, _, cx| this.follow_workspace(cx));
+        let _panel_subscription = cx.observe(&panel, |_, _, cx| cx.notify());
 
         Self {
-            project,
+            multi_workspace,
             panel,
-            workspace,
             threads,
             threads_side: ThreadsSide::Left,
-            highlighted_thread: None,
-            threads_width: DEFAULT_THREADS_WIDTH,
-            _threads_subscriptions: [_threads_subscription, _redraw_on_history],
+            _panel_subscription,
+            _multi_workspace_subscription,
         }
     }
 
-    /// Opens a thread, moving this window — and the editor — to the worktree it belongs to.
+    /// Follows the editor window from one workspace to another.
     ///
-    /// A thread records the folders it was held against, and loading one into the wrong
-    /// workspace makes the panel re-record it there, silently rewriting where the conversation
-    /// lives. So the workspace is switched first and the thread loaded into *its* panel, which
-    /// is what Zed's own sidebar does.
-    fn activate_thread(
-        &mut self,
-        thread: ThreadMetadata,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let thread_id = thread.thread_id;
-        // Whatever happens next, the archive has to stop spinning: it refuses a second click on
-        // a thread it still believes is restoring.
-        self.threads.update(cx, |threads, cx| {
-            threads.clear_restoring(&thread_id, cx);
-        });
-
-        let workspace = if self.holds(&thread, cx) {
-            self.workspace.upgrade()
-        } else {
-            // Only worktrees already open in some window. Opening one that is not runs through
-            // the sidebar's private machinery, so those are left to it.
-            self.find_open_workspace(&thread, cx)
-        };
-        let Some(workspace) = workspace else {
-            return;
-        };
-
-        // The panel belongs to the workspace, so following one means following the other. Same
-        // for the project, or the next `cmd-alt-0` would not find this window and would open a
-        // second one beside it.
+    /// Activating a thread that belongs elsewhere switches the whole editor window, and the panel
+    /// belongs to a workspace — so the one this window renders has to be swapped for the new
+    /// workspace's, or it would keep showing the conversation we just navigated away from.
+    fn follow_workspace(&mut self, cx: &mut Context<Self>) {
+        let workspace = self.multi_workspace.read(cx).workspace().clone();
         let Some(panel) = workspace.read(cx).panel::<AgentPanel>(cx) else {
             return;
         };
-        self.project = workspace.read(cx).project().clone();
-        self.workspace = workspace.downgrade();
-        self.panel = panel.clone();
-
-        panel.update(cx, |panel, cx| {
-            panel.load_agent_thread(
-                Agent::from(thread.agent_id.clone()),
-                thread_id,
-                Some(thread.folder_paths().clone()),
-                thread.title.clone(),
-                true,
-                AgentThreadSource::Sidebar,
-                window,
-                cx,
-            );
-        });
+        if panel == self.panel {
+            return;
+        }
+        self._panel_subscription = cx.observe(&panel, |_, _, cx| cx.notify());
+        self.panel = panel;
         cx.notify();
-    }
-
-    /// Points the list at whatever conversation the panel is showing.
-    ///
-    /// The archive highlights only what the keyboard moved to, so without this the open thread
-    /// is never marked — on opening the window, or when the thread is switched from the panel
-    /// side. Driven from `render` because the archive loads its history in the background, so
-    /// there is nothing to select until it has.
-    fn sync_highlight(&mut self, cx: &mut Context<Self>) {
-        let active = self.panel.read(cx).active_thread_id(cx);
-        if active == self.highlighted_thread {
-            return;
-        }
-        let Some(thread_id) = active else {
-            self.highlighted_thread = None;
-            return;
-        };
-        // Only remembered once the row actually exists. The archive loads its history in the
-        // background, so on opening the window there is nothing to select yet, and recording the
-        // attempt would mean never trying again.
-        let selected = self
-            .threads
-            .update(cx, |threads, cx| threads.select_thread(&thread_id, cx));
-        if selected {
-            self.highlighted_thread = active;
-        }
-    }
-
-    /// Whether a thread was recorded against exactly the folders this window's project holds.
-    fn holds(&self, thread: &ThreadMetadata, cx: &App) -> bool {
-        let folders = thread.folder_paths();
-        folders.is_empty()
-            || self
-                .project
-                .read(cx)
-                .worktree_paths(cx)
-                .folder_path_list()
-                .paths()
-                == folders.paths()
-    }
-
-    /// The already-open workspace whose folders are the ones this thread was recorded against,
-    /// brought to the front of its window on the way — which is what moves the editor with us.
-    fn find_open_workspace(
-        &self,
-        thread: &ThreadMetadata,
-        cx: &mut Context<Self>,
-    ) -> Option<Entity<Workspace>> {
-        let wanted = thread.folder_paths().paths().to_vec();
-        let found = cx.windows().into_iter().find_map(|handle| {
-            let handle = handle.downcast::<MultiWorkspace>()?;
-            let multi_workspace = handle.read(cx).ok()?;
-            let workspace = multi_workspace
-                .workspaces()
-                .find(|workspace| {
-                    workspace
-                        .read(cx)
-                        .root_paths(cx)
-                        .iter()
-                        .map(|path| path.to_path_buf())
-                        .collect::<Vec<_>>()
-                        == wanted
-                })?
-                .clone();
-            Some((handle, workspace))
-        });
-
-        let (handle, workspace) = found?;
-        handle
-            .update(cx, |multi_workspace, window, cx| {
-                multi_workspace.activate(workspace.clone(), None, window, cx);
-            })
-            .log_err();
-        Some(workspace)
     }
 
     /// The window's own strip: room for the traffic lights, and the one control that is ours.
@@ -386,9 +253,14 @@ impl IdeaAgentWindow {
             .h_9()
             .pl(TRAFFIC_LIGHT_INSET)
             .pr_2()
-            .justify_end()
+            .justify_between()
             .border_b_1()
             .border_color(cx.theme().colors().border)
+            .child(
+                Label::new(VERSION)
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
+            )
             .child(
                 h_flex()
                     .gap_px()
@@ -420,7 +292,11 @@ impl IdeaAgentWindow {
     /// The draggable seam between the two panes: a one-pixel line with a wider invisible handle
     /// centred on it, so it looks like every other divider but is possible to grab. Same shape as
     /// the split editor's own handle.
+    ///
+    /// It drives the sidebar's own width rather than a width of ours, since the sidebar draws
+    /// itself at whatever it was last set to.
     fn render_divider(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let from_left = self.threads_side == ThreadsSide::Left;
         div()
             .relative()
             .w_px()
@@ -438,12 +314,18 @@ impl IdeaAgentWindow {
                     .block_mouse_except_scroll()
                     .on_drag(DividerDrag, |_, _, _, cx| cx.new(|_| DividerPreview))
                     .on_drag_move::<DividerDrag>(cx.listener(
-                        |this, event: &gpui::DragMoveEvent<DividerDrag>, _window, cx| {
-                            this.threads_width = event
-                                .event
-                                .position
-                                .x
-                                .clamp(MIN_THREADS_WIDTH, MAX_THREADS_WIDTH);
+                        move |this, event: &gpui::DragMoveEvent<DividerDrag>, window, cx| {
+                            let x = event.event.position.x;
+                            // Dragging a pane on the right grows it as the pointer moves left.
+                            let width = if from_left {
+                                x
+                            } else {
+                                window.viewport_size().width - x
+                            };
+                            this.threads.set_width(
+                                Some(width.clamp(MIN_THREADS_WIDTH, MAX_THREADS_WIDTH)),
+                                cx,
+                            );
                             cx.notify();
                         },
                     )),
@@ -452,27 +334,8 @@ impl IdeaAgentWindow {
 }
 
 impl Render for IdeaAgentWindow {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.sync_highlight(cx);
-
-        // Capped against the window as well as its own bounds: the window can be dragged
-        // narrower than the pane's stored width.
-        let width = self.threads_width.min(window.viewport_size().width * 0.7);
-
-        let threads = div()
-            .w(width)
-            .h_full()
-            .flex_none()
-            // ponytail: the archive's header sizes itself as a titlebar and pulls itself up a
-            // pixel under client decorations, so it sits a pixel above the agent panel's toolbar.
-            // Nudging the whole pane back down lines the two headers up; it also moves the list
-            // by a pixel, which is the trade. Drop this if upstream stops doing it.
-            .mt(px(1.))
-            // A row's title fades out under a *solid* patch of what `ThreadItem` assumes the
-            // sidebar's background is. The archive paints no background of its own, so unless
-            // this pane matches that assumption every fade shows as a rectangle.
-            .bg(sidebar_background(cx))
-            .child(self.threads.clone());
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let threads = self.threads.clone();
         let panel = div().flex_1().min_w_0().h_full().child(self.panel.clone());
 
         v_flex()
@@ -493,16 +356,6 @@ impl Render for IdeaAgentWindow {
                 }
             }))
     }
-}
-
-/// What `ui::ThreadItem` blends its title fade into when nobody sets `base_bg`: the sidebar's
-/// background, which the archive is normally drawn on. Copied rather than exposed, since it is a
-/// local in `thread_item.rs`.
-fn sidebar_background(cx: &App) -> gpui::Hsla {
-    let colors = cx.theme().colors();
-    colors
-        .title_bar_background
-        .blend(colors.panel_background.opacity(0.25))
 }
 
 impl Focusable for IdeaAgentWindow {
