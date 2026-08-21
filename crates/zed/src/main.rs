@@ -748,6 +748,7 @@ fn main() {
         search::init(cx);
         idea_search::init(cx);
         idea_git::init(cx);
+        idea_agent::init(cx);
         lsp_locations::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
             setup_search_bar: |languages, toolbar, window, cx| {

@@ -14,7 +14,7 @@ use settings::Settings;
 use ui::{ButtonLike, KeyBinding, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use util::{ResultExt, paths::PathExt};
 use workspace::{
-    MultiWorkspace, OpenMode, OpenOptions, ProjectGroupKey, RecentWorkspace,
+    OpenMode, OpenOptions, ProjectGroupKey, RecentWorkspace,
     SerializedWorkspaceLocation, Workspace, WorkspaceDb, notifications::DetachAndPromptErr,
 };
 
@@ -235,7 +235,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
 
         match &recent_workspace.location {
             SerializedWorkspaceLocation::Local => {
-                if let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() {
+                if let Some(handle) = workspace.read(cx).multi_workspace_window(window, cx) {
                     let paths = recent_workspace.paths.paths().to_vec();
                     cx.defer(move |cx| {
                         if let Some(task) = handle
@@ -253,7 +253,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                 let mut connection = connection.clone();
                 workspace.update(cx, |workspace, cx| {
                     let app_state = workspace.app_state().clone();
-                    let replace_window = window.window_handle().downcast::<MultiWorkspace>();
+                    let replace_window = workspace.multi_workspace_window(window, cx);
                     let open_options = OpenOptions {
                         requesting_window: replace_window,
                         ..Default::default()

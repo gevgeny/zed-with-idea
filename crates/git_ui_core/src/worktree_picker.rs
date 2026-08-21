@@ -685,7 +685,10 @@ impl WorktreePickerDelegate {
         else {
             return;
         };
-        let Some(window_handle) = window.window_handle().downcast::<MultiWorkspace>() else {
+        let Some(window_handle) = workspace_to_remove
+            .read(cx)
+            .multi_workspace_window(window, cx)
+        else {
             return;
         };
 

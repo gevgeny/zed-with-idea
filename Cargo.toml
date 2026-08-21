@@ -106,6 +106,7 @@ members = [
     "crates/http_client_tls",
     "crates/http_proxy",
     "crates/icons",
+    "crates/idea_agent",
     "crates/idea_git",
     "crates/idea_search",
     "crates/image_viewer",
@@ -370,6 +371,7 @@ http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }
+idea_agent = { path = "crates/idea_agent" }
 idea_git = { path = "crates/idea_git" }
 idea_search = { path = "crates/idea_search" }
 image_viewer = { path = "crates/image_viewer" }
@@ -1014,6 +1016,14 @@ quote = { opt-level = 3 }
 syn = { opt-level = 3 }
 proc-macro2 = { opt-level = 3 }
 # proc-macros end
+
+# The agent panel's request dispatcher is a tower of nested generic futures, one layer per request
+# type. Unoptimised, that compiles to a single stack frame too large for the 512 KiB stack of the
+# Grand Central Dispatch queues gpui runs background work on, and opening the panel in a debug
+# build overflows it. Optimising just these two collapses the frame; everything else stays
+# unoptimised and quick to rebuild.
+agent-client-protocol = { opt-level = 2 }
+agent_servers = { opt-level = 2 }
 
 tree-sitter = { opt-level = 3 }
 taffy = { opt-level = 3 }

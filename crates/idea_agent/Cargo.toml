@@ -1,0 +1,22 @@
+[package]
+name = "idea_agent"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/idea_agent.rs"
+doctest = false
+
+[dependencies]
+agent_ui.workspace = true
+gpui.workspace = true
+sidebar.workspace = true
+theme.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true

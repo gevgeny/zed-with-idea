@@ -2615,6 +2615,24 @@ impl Workspace {
         self.multi_workspace.as_ref()
     }
 
+    /// The window that owns this workspace, for opening, switching or closing another one.
+    ///
+    /// Normally the window the request came from, since a workspace is displayed by its own
+    /// multi-workspace. But a view can be hosted by some other window — one rendering an
+    /// `AgentPanel` or a `Sidebar` outside the editor — and there the caller's window is not a
+    /// multi-workspace at all. Falling back to our own means the workspace opens where it belongs
+    /// instead of in a new window, or not at all.
+    pub fn multi_workspace_window(
+        &self,
+        window: &Window,
+        cx: &App,
+    ) -> Option<WindowHandle<MultiWorkspace>> {
+        window
+            .window_handle()
+            .downcast::<MultiWorkspace>()
+            .or_else(|| self.multi_workspace()?.upgrade()?.read(cx).window(cx))
+    }
+
     pub fn set_multi_workspace(
         &mut self,
         multi_workspace: WeakEntity<MultiWorkspace>,

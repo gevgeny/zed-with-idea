@@ -886,7 +886,7 @@ impl Sidebar {
             this.schedule_update_entries(false, cx);
         });
 
-        Self {
+        let mut this = Self {
             multi_workspace: multi_workspace.downgrade(),
             width: DEFAULT_WIDTH,
             focus_handle,
@@ -920,7 +920,13 @@ impl Sidebar {
             update_task: None,
             import_banners_use_verbose_labels: None,
             cross_channel_import_channels: Vec::new(),
-        }
+        };
+
+        // `active_entry` is otherwise only ever set in response to an event, so a sidebar built
+        // after the window has already settled — rather than alongside it at startup — would
+        // highlight nothing until the user switched workspaces.
+        this.sync_active_entry_from_active_workspace(cx);
+        this
     }
 
     fn serialize(&mut self, cx: &mut Context<Self>) {

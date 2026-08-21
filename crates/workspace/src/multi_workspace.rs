@@ -4,7 +4,7 @@ use fs::Fs;
 use gpui::{
     AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
     ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity, Window,
-    WindowId, actions, deferred, px,
+    WindowHandle, WindowId, actions, deferred, px,
 };
 pub use project::ProjectGroupKey;
 use project::{DisableAiSettings, Project};
@@ -1126,7 +1126,7 @@ impl MultiWorkspace {
         };
 
         let app_state = self.workspace().read(cx).app_state().clone();
-        let window_handle = window.window_handle().downcast::<MultiWorkspace>();
+        let window_handle = self.requesting_window(window, cx);
         let connect_task = connect_remote(connection_options.clone(), window, cx);
         let paths_vec = paths.paths().to_vec();
 
@@ -1218,7 +1218,7 @@ impl MultiWorkspace {
 
         let paths = path_list.paths().to_vec();
         let app_state = self.workspace().read(cx).app_state().clone();
-        let requesting_window = window.window_handle().downcast::<MultiWorkspace>();
+        let requesting_window = self.requesting_window(window, cx);
         let fs = <dyn Fs>::global(cx);
 
         cx.spawn(async move |_this, cx| {
@@ -1280,6 +1280,26 @@ impl MultiWorkspace {
                 .await?;
             Ok(result.workspace)
         })
+    }
+
+    /// The window this multi-workspace lives in.
+    pub fn window(&self, cx: &App) -> Option<WindowHandle<MultiWorkspace>> {
+        cx.windows()
+            .into_iter()
+            .filter_map(|handle| handle.downcast::<MultiWorkspace>())
+            .find(|handle| handle.window_id() == self.window_id)
+    }
+
+    /// The window a workspace opened from here belongs in.
+    ///
+    /// Normally that is the window the request came from, but a view hosted in some other window
+    /// can drive a multi-workspace too, and there the caller's window is not one — falling back to
+    /// our own keeps the workspace here instead of opening a window for it.
+    fn requesting_window(&self, window: &Window, cx: &App) -> Option<WindowHandle<MultiWorkspace>> {
+        window
+            .window_handle()
+            .downcast::<MultiWorkspace>()
+            .or_else(|| self.window(cx))
     }
 
     pub fn workspace(&self) -> &Entity<Workspace> {
