@@ -2995,9 +2995,17 @@ impl ConversationView {
                 .push(cx.subscribe_in(&pop_up, window, {
                     move |this, _, event, window, cx| match event {
                         AgentNotificationEvent::Accepted => {
-                            let Some(handle) = window.window_handle().downcast::<MultiWorkspace>()
+                            let Some(handle) = this
+                                .workspace
+                                .read_with(cx, |workspace, cx| {
+                                    workspace.multi_workspace_window(window, cx)
+                                })
+                                .ok()
+                                .flatten()
                             else {
-                                log::error!("root view should be a MultiWorkspace");
+                                log::error!(
+                                    "no multi-workspace window for the conversation's workspace"
+                                );
                                 return;
                             };
                             cx.activate(true);

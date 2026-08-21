@@ -45,7 +45,7 @@ const TRAFFIC_LIGHT_INSET: Pixels = px(76.);
 
 /// Bumped on every change, and shown in the header so a running build can be identified while
 /// iterating. Remove before this is considered finished.
-const VERSION: &str = "0.2.p2";
+const VERSION: &str = "0.2.p4";
 
 /// Where the threads list sits relative to the conversation.
 #[derive(PartialEq, Clone, Copy)]

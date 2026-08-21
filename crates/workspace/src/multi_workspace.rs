@@ -1282,6 +1282,14 @@ impl MultiWorkspace {
         })
     }
 
+    /// The window this multi-workspace lives in.
+    pub fn window(&self, cx: &App) -> Option<WindowHandle<MultiWorkspace>> {
+        cx.windows()
+            .into_iter()
+            .filter_map(|handle| handle.downcast::<MultiWorkspace>())
+            .find(|handle| handle.window_id() == self.window_id)
+    }
+
     /// The window a workspace opened from here belongs in.
     ///
     /// Normally that is the window the request came from, but a view hosted in some other window
@@ -1291,12 +1299,7 @@ impl MultiWorkspace {
         window
             .window_handle()
             .downcast::<MultiWorkspace>()
-            .or_else(|| {
-                cx.windows()
-                    .into_iter()
-                    .filter_map(|handle| handle.downcast::<MultiWorkspace>())
-                    .find(|handle| handle.window_id() == self.window_id)
-            })
+            .or_else(|| self.window(cx))
     }
 
     pub fn workspace(&self) -> &Entity<Workspace> {

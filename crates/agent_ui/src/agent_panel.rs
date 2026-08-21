@@ -2701,8 +2701,15 @@ impl AgentPanel {
         let event_subscription = cx.subscribe_in(&pop_up, window, {
             move |this, _, event: &AgentNotificationEvent, window, cx| match event {
                 AgentNotificationEvent::Accepted => {
-                    let Some(handle) = window.window_handle().downcast::<MultiWorkspace>() else {
-                        log::error!("root view should be a MultiWorkspace");
+                    let Some(handle) = this
+                        .workspace
+                        .read_with(cx, |workspace, cx| {
+                            workspace.multi_workspace_window(window, cx)
+                        })
+                        .ok()
+                        .flatten()
+                    else {
+                        log::error!("no multi-workspace window for the panel's workspace");
                         return;
                     };
                     cx.activate(true);
