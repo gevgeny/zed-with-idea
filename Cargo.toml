@@ -106,9 +106,9 @@ members = [
     "crates/http_client_tls",
     "crates/http_proxy",
     "crates/icons",
-    "crates/idea_agent",
-    "crates/idea_git",
-    "crates/idea_search",
+    "crates/plus_agent",
+    "crates/plus_git",
+    "crates/plus_search",
     "crates/image_viewer",
     "crates/input_latency_ui",
     "crates/inspector_ui",
@@ -371,9 +371,9 @@ http_client = { path = "crates/http_client" }
 http_client_tls = { path = "crates/http_client_tls" }
 http_proxy = { path = "crates/http_proxy" }
 icons = { path = "crates/icons" }
-idea_agent = { path = "crates/idea_agent" }
-idea_git = { path = "crates/idea_git" }
-idea_search = { path = "crates/idea_search" }
+plus_agent = { path = "crates/plus_agent" }
+plus_git = { path = "crates/plus_git" }
+plus_search = { path = "crates/plus_search" }
 image_viewer = { path = "crates/image_viewer" }
 edit_prediction_types = { path = "crates/edit_prediction_types" }
 edit_prediction_ui = { path = "crates/edit_prediction_ui" }
@@ -1003,7 +1003,18 @@ debug = "full"
 [profile.dbg.build-override]
 debug = "full"
 
+# `dbg` inherits `dev`, including its per-package settings, so the dependency debuginfo it exists
+# to provide has to be asked for again here.
+[profile.dbg.package]
+"*" = { debug = "full" }
+
 [profile.dev.package]
+# Dependencies keep their symbols but lose line tables, which is most of what `target/debug` is
+# made of — the tree grows past 90 GB otherwise. Workspace members are not matched by `*`, so
+# every crate under `crates/` still has full debuginfo. Use `--profile dbg` when a third-party
+# frame needs line numbers.
+"*" = { debug = false }
+
 # proc-macros start
 gpui_macros = { opt-level = 3 }
 derive_refineable = { opt-level = 3 }

@@ -1186,6 +1186,9 @@ pub struct AgentPanel {
     last_context_source: Option<AgentContextSource>,
 
     is_active: bool,
+    // zed-plus: hides the controls that only work inside a workspace window, for the agent
+    // window that renders this panel outside the dock.
+    hosted: bool,
 }
 
 impl AgentPanel {
@@ -1589,6 +1592,7 @@ impl AgentPanel {
             _thread_metadata_store_subscription,
             last_context_source: None,
             is_active: false,
+            hosted: false,
         };
 
         panel.ensure_native_agent_connection(cx);
@@ -2701,6 +2705,7 @@ impl AgentPanel {
         let event_subscription = cx.subscribe_in(&pop_up, window, {
             move |this, _, event: &AgentNotificationEvent, window, cx| match event {
                 AgentNotificationEvent::Accepted => {
+                    // zed-plus: the panel may be rendered by the agent window rather than the dock.
                     let Some(handle) = this
                         .workspace
                         .read_with(cx, |workspace, cx| {
@@ -3659,6 +3664,13 @@ impl AgentPanel {
     pub fn reset_agent_zoom(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         theme_settings::reset_agent_ui_font_size(cx);
         theme_settings::reset_agent_buffer_font_size(cx);
+    }
+
+    // zed-plus: lets the agent window mark this panel as rendered outside the dock, so the
+    // controls that act on the dock or the editor window's sidebar are not offered there.
+    pub fn set_hosted(&mut self, hosted: bool, cx: &mut Context<Self>) {
+        self.hosted = hosted;
+        cx.notify();
     }
 
     pub fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
@@ -5601,6 +5613,9 @@ impl AgentPanel {
 
         let workspace = self.workspace.clone();
 
+        // zed-plus: read here because the menu builder below captures no `self`.
+        let hosted = self.hosted;
+
         PopoverMenu::new("agent-options-menu")
             .trigger_with_tooltip(
                 IconButton::new("agent-options-menu", IconName::Ellipsis)
@@ -5745,8 +5760,14 @@ impl AgentPanel {
 
                         menu = menu
                             .action("Settings", Box::new(OpenSettings))
-                            .separator()
-                            .action("Toggle Threads Sidebar", Box::new(ToggleWorkspaceSidebar));
+                            // zed-plus: this dispatches to the editor window's sidebar, which the
+                            // agent window has no way to reach.
+                            .when(!hosted, |menu| {
+                                menu.separator().action(
+                                    "Toggle Threads Sidebar",
+                                    Box::new(ToggleWorkspaceSidebar),
+                                )
+                            });
 
                         if has_auth_methods || supports_logout {
                             menu = menu.separator()
@@ -6140,7 +6161,9 @@ impl AgentPanel {
                         .gap_1()
                         .children(sandbox_status)
                         .when(can_create_entries, |this| this.child(new_thread_menu))
-                        .child(full_screen_button)
+                        // zed-plus: zooming is a dock affordance; nothing listens to it in
+                        // the agent window.
+                        .when(!self.hosted, |this| this.child(full_screen_button))
                         .child(self.render_panel_options_menu(window, cx)),
                 )
                 .into_any_element()

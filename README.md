@@ -1,49 +1,83 @@
-# Zed
+<div align="center">
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+# Zed Plus
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+**A fork of [Zed](https://github.com/zed-industries/zed) that pulls its panels out into windows of their own.**
+
+[![Based on Zed](https://img.shields.io/badge/based%20on-Zed-084CCF)](https://github.com/zed-industries/zed)
+[![License: GPL v3](https://img.shields.io/badge/license-GPL--3.0-blue)](./LICENSE-GPL)
+![Built by Claude](https://img.shields.io/badge/built%20by-Claude-D97757)
+
+</div>
+
+> [!WARNING]
+> **Every line here was written by Claude.** I directed the work and reviewed it, but only
+> superficially — I don't write Rust, and I don't know Zed's internals well enough to catch a
+> subtle mistake in them.
+>
+> Treat this as a personal build, not a maintained project. It works for what I use it for.
+> Nothing guarantees it works for anything else: there are no tests beyond what upstream already
+> had, and the changes to Zed's own crates have only been checked by someone unqualified to
+> check them.
+
+## Why
+
+Zed keeps a lot of what you need in docked panels, but a dock shows one of them at a time.
+Wanting the git panel and the agent side by side means swapping between them all day, on a screen
+that usually has room for both.
+
+This fork moves those two into real windows:
+
+- **Beside the editor**, both visible at once
+- **On a second display**, out of the way of the code
+- **Over the editor**, opened and dismissed like a dialog
+
+The window is another way to reach the same panel, not a copy of it — same conversation, same
+staged files, same state.
+
+## Agent window
+
+<kbd>cmd</kbd>+<kbd>alt</kbd>+<kbd>u</kbd>
+
+The conversation and the threads list together, beside the editor rather than squeezed into a
+dock next to it. Activating a thread from another worktree switches the editor to it, and this
+window with it.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
+  <img alt="Three windows side by side: git changes on the left, the editor and project tree in the middle, the agent and its threads on the right" src="docs/screenshots/overview-light.png">
+</picture>
+
+## Git window
+
+<kbd>cmd</kbd>+<kbd>alt</kbd>+<kbd>v</kbd>
+
+The diff shows the selected file on its own, rather than Zed's single scroll through every
+changed file at once. Click a file to preview it here; double-click to open it as a normal tab —
+without an "all changes" tab sitting in your editor for the rest of the day.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/git-window-dark.png">
+  <img alt="The git window open over the editor, showing the changed-file tree, a file's diff and the commit box" src="docs/screenshots/git-window-light.png">
+</picture>
+
+## Building
+
+There are no prebuilt releases — build it the way you would build Zed:
+
+```sh
+git clone https://github.com/gevgeny/zed-with-idea.git
+cd zed-with-idea
+cargo run
+```
+
+See upstream's [development docs](./docs/src/development) for platform prerequisites.
 
 ---
 
-### Installation
+<div align="center">
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+Everything not described above is upstream Zed, unchanged —
+including [licensing](./LICENSE-GPL) and how the editor itself works.
 
-Other platforms are not yet available:
-
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
-
-### Developing Zed
-
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
-
-### Contributing
-
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
-
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
-
-### Licensing
-
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
-
-License information for third party dependencies must be correctly provided for CI to pass.
-
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
-
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
-
-## Sponsorship
-
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
-
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
-
+</div>

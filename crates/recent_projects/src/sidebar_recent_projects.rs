@@ -235,6 +235,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
 
         match &recent_workspace.location {
             SerializedWorkspaceLocation::Local => {
+                // zed-plus: the sidebar hosting this may be rendered by the agent window.
                 if let Some(handle) = workspace.read(cx).multi_workspace_window(window, cx) {
                     let paths = recent_workspace.paths.paths().to_vec();
                     cx.defer(move |cx| {
@@ -253,6 +254,7 @@ impl PickerDelegate for SidebarRecentProjectsDelegate {
                 let mut connection = connection.clone();
                 workspace.update(cx, |workspace, cx| {
                     let app_state = workspace.app_state().clone();
+                    // zed-plus: same reason as the local branch above.
                     let replace_window = workspace.multi_workspace_window(window, cx);
                     let open_options = OpenOptions {
                         requesting_window: replace_window,

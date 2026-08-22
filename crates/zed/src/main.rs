@@ -746,9 +746,10 @@ fn main() {
         snippets_ui::init(cx);
         channel::init(&app_state.client.clone(), app_state.user_store.clone(), cx);
         search::init(cx);
-        idea_search::init(cx);
-        idea_git::init(cx);
-        idea_agent::init(cx);
+        // `plus_search` is left out: Zed's own `text_finder` covers the same ground. The crate
+        // stays in the workspace so it still builds, but nothing registers it.
+        plus_git::init(cx);
+        plus_agent::init(cx);
         lsp_locations::init(cx);
         cx.set_global(workspace::PaneSearchBarCallbacks {
             setup_search_bar: |languages, toolbar, window, cx| {

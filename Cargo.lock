@@ -8962,68 +8962,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25a2bc672d1148e28034f176e01fffebb08b35768468cc954630da77a1449005"
 
 [[package]]
-name = "idea_agent"
-version = "0.1.0"
-dependencies = [
- "agent_ui",
- "gpui",
- "sidebar",
- "theme",
- "ui",
- "util",
- "workspace",
-]
-
-[[package]]
-name = "idea_git"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "askpass",
- "buffer_diff",
- "editor",
- "file_icons",
- "git",
- "git_ui",
- "git_ui_core",
- "gpui",
- "language",
- "menu",
- "multi_buffer",
- "project",
- "settings",
- "theme",
- "theme_settings",
- "ui",
- "util",
- "workspace",
-]
-
-[[package]]
-name = "idea_search"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "collections",
- "editor",
- "futures 0.3.32",
- "gpui",
- "language",
- "menu",
- "picker",
- "picker_preview",
- "project",
- "search",
- "settings",
- "text",
- "theme",
- "theme_settings",
- "ui",
- "util",
- "workspace",
-]
-
-[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13911,6 +13849,68 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
+]
+
+[[package]]
+name = "plus_agent"
+version = "0.1.0"
+dependencies = [
+ "agent_ui",
+ "gpui",
+ "sidebar",
+ "theme",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "plus_git"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "askpass",
+ "buffer_diff",
+ "editor",
+ "file_icons",
+ "git",
+ "git_ui",
+ "git_ui_core",
+ "gpui",
+ "language",
+ "menu",
+ "multi_buffer",
+ "project",
+ "settings",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "plus_search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "editor",
+ "futures 0.3.32",
+ "gpui",
+ "language",
+ "menu",
+ "picker",
+ "picker_preview",
+ "project",
+ "search",
+ "settings",
+ "text",
+ "theme",
+ "theme_settings",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
@@ -23405,9 +23405,6 @@ dependencies = [
  "gpui_tokio",
  "hdrhistogram",
  "http_client",
- "idea_agent",
- "idea_git",
- "idea_search",
  "image",
  "image_viewer",
  "input_latency_ui",
@@ -23443,6 +23440,8 @@ dependencies = [
  "paths",
  "picker",
  "pkg-config",
+ "plus_agent",
+ "plus_git",
  "pretty_assertions",
  "profiling",
  "project",
