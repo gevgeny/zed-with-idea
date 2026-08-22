@@ -35,26 +35,26 @@ This fork moves those two into real windows:
 The window is another way to reach the same panel, not a copy of it — same conversation, same
 staged files, same state.
 
-## Features
+## Agent window
 
-| Window | Shortcut | |
-| --- | --- | --- |
-| **Agent** | <kbd>cmd</kbd>+<kbd>alt</kbd>+<kbd>u</kbd> | Agent panel and threads sidebar, side by side |
-| **Git** | <kbd>cmd</kbd>+<kbd>alt</kbd>+<kbd>v</kbd> | Changes tree, commit box and a side-by-side diff |
+<kbd>cmd</kbd>+<kbd>alt</kbd>+<kbd>u</kbd>
 
-On Linux and Windows, <kbd>ctrl</kbd> replaces <kbd>cmd</kbd>.
+The conversation and the threads list together, beside the editor rather than squeezed into a
+dock next to it. Activating a thread from another worktree switches the editor to it, and this
+window with it.
 
-Both windows follow the editor. Activating a thread that belongs to another worktree switches the
-editor to it, and the window with it.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/overview-dark.png">
+  <img alt="Three windows side by side: git changes on the left, the editor and project tree in the middle, the agent and its threads on the right" src="docs/screenshots/overview-light.png">
+</picture>
 
-### Agent window
+## Git window
 
-<!-- screenshot: docs/screenshots/agent-window.png -->
-
-### Git window
+<kbd>cmd</kbd>+<kbd>alt</kbd>+<kbd>v</kbd>
 
 The diff shows the selected file on its own, rather than Zed's single scroll through every
-changed file at once.
+changed file at once. Click a file to preview it here; double-click to open it as a normal tab —
+without an "all changes" tab sitting in your editor for the rest of the day.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/git-window-dark.png">
