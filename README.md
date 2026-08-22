@@ -53,7 +53,13 @@ editor to it, and the window with it.
 
 ### Git window
 
-<!-- screenshot: docs/screenshots/git-window.png -->
+The diff shows the selected file on its own, rather than Zed's single scroll through every
+changed file at once.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/git-window-dark.png">
+  <img alt="The git window open over the editor, showing the changed-file tree, a file's diff and the commit box" src="docs/screenshots/git-window-light.png">
+</picture>
 
 ## Building
 
