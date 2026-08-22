@@ -6,9 +6,9 @@ A fork of [Zed](https://github.com/zed-industries/zed) that pulls its panels out
 
 ## Important notice
 
-This fork is written by a developer with **no Rust experience** and no real knowledge of Zed's architecture. Every line of it was implemented by Claude.
+**Every line here was written by Claude.** I directed the work and reviewed it, but only superficially — I don't write Rust, and I don't know Zed's internals well enough to catch a subtle mistake in them.
 
-Treat it accordingly: it is a personal build, not a maintained project. There is no test coverage beyond what upstream already had, no review by anyone who knows this codebase, and no guarantee that the changes to Zed's own crates are correct in cases nobody happened to try.
+So treat this as a personal build rather than a maintained project. It works for what I use it for. Nothing guarantees it works for anything else: there are no tests beyond what upstream already had, and the changes to Zed's own crates have only been checked by someone unqualified to check them.
 
 ## Features
 
