@@ -1003,7 +1003,18 @@ debug = "full"
 [profile.dbg.build-override]
 debug = "full"
 
+# `dbg` inherits `dev`, including its per-package settings, so the dependency debuginfo it exists
+# to provide has to be asked for again here.
+[profile.dbg.package]
+"*" = { debug = "full" }
+
 [profile.dev.package]
+# Dependencies keep their symbols but lose line tables, which is most of what `target/debug` is
+# made of — the tree grows past 90 GB otherwise. Workspace members are not matched by `*`, so
+# every crate under `crates/` still has full debuginfo. Use `--profile dbg` when a third-party
+# frame needs line numbers.
+"*" = { debug = false }
+
 # proc-macros start
 gpui_macros = { opt-level = 3 }
 derive_refineable = { opt-level = 3 }

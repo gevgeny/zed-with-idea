@@ -19,7 +19,10 @@ use gpui::{
 };
 use sidebar::Sidebar;
 use theme::ActiveTheme as _;
-use ui::{IconButton, Tooltip, h_flex, prelude::*, v_flex};
+use ui::{
+    Divider, DividerColor, IconButton, Tooltip, h_flex, prelude::*,
+    utils::platform_title_bar_height, v_flex,
+};
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, SidebarHandle as _, Workspace, dock::Dock};
 
@@ -45,7 +48,7 @@ const TRAFFIC_LIGHT_INSET: Pixels = px(76.);
 
 /// Bumped on every change, and shown in the header so a running build can be identified while
 /// iterating. Remove before this is considered finished.
-const VERSION: &str = "0.2.p4";
+const VERSION: &str = "0.2.p14";
 
 /// Where the threads list sits relative to the conversation.
 #[derive(PartialEq, Clone, Copy)]
@@ -94,7 +97,16 @@ fn register(workspace: &mut Workspace, _window: Option<&mut Window>, _: &mut Con
         // Looked up here, while the workspace is already in hand. An action handler runs inside
         // `workspace.update`, so anything that leases it again panics.
         let position = workspace::dock::PanelHandle::position(&panel, window, cx);
-        let dock = workspace.dock_at_position(position).downgrade();
+        let dock = workspace.dock_at_position(position);
+        // Only worth closing when the conversation is what that dock is currently showing. Panels
+        // share a dock, so closing it whenever the window opens would take down whatever else the
+        // user had there — the git panel, say — which has nothing to do with this window.
+        let dock = dock
+            .read(cx)
+            .active_panel_index()
+            .zip(dock.read(cx).panel_index_for_type::<AgentPanel>())
+            .is_some_and(|(active, agent)| active == agent)
+            .then(|| dock.downgrade());
         toggle_window(multi_workspace, panel, dock, window, cx);
     });
 }
@@ -105,7 +117,7 @@ fn register(workspace: &mut Workspace, _window: Option<&mut Window>, _: &mut Con
 fn toggle_window(
     multi_workspace: Entity<MultiWorkspace>,
     panel: Entity<AgentPanel>,
-    dock: WeakEntity<Dock>,
+    dock: Option<WeakEntity<Dock>>,
     window: &mut Window,
     cx: &mut App,
 ) {
@@ -128,9 +140,11 @@ fn toggle_window(
 
     // The panel is about to be shown somewhere else, so take the dock down with it: two copies of
     // one conversation on screen at once is confusing rather than useful, and the dock is the one
-    // the user just asked to leave.
-    dock.update(cx, |dock, cx| dock.set_open(false, window, cx))
-        .log_err();
+    // the user just asked to leave. `None` when the dock is showing something else entirely.
+    if let Some(dock) = dock {
+        dock.update(cx, |dock, cx| dock.set_open(false, window, cx))
+            .log_err();
+    }
 
     // Deferred to get the workspace off the stack, as the settings window does.
     cx.defer(move |cx| {
@@ -185,6 +199,7 @@ pub struct IdeaAgentWindow {
     /// stops being the right one. Rebuilt whenever the panel itself is swapped.
     _panel_subscription: Subscription,
     _multi_workspace_subscription: Subscription,
+    _editor_window_subscription: Subscription,
 }
 
 impl IdeaAgentWindow {
@@ -194,13 +209,34 @@ impl IdeaAgentWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let threads = cx.new(|cx| Sidebar::new(multi_workspace.clone(), window, cx));
+        let threads = cx.new(|cx| {
+            let mut sidebar = Sidebar::new(multi_workspace.clone(), window, cx);
+            // Rendered outside the editor window: no dock to reveal, and no sidebar of its own
+            // to toggle.
+            sidebar.set_hosted(true);
+            sidebar
+        });
+
+        // Threads hang off a pinned project group, and nothing pins the active workspace until a
+        // sidebar is opened — which is why the list reads "No threads yet" until the editor
+        // window's own sidebar is shown. Showing threads here is the same claim, so make it.
+        multi_workspace.update(cx, |multi_workspace, cx| {
+            multi_workspace.retain_active_workspace(cx);
+        });
 
         // Deliberately not `register_sidebar`: that would make this instance *the* sidebar of the
         // editor window, replacing the one already there.
         let _multi_workspace_subscription =
             cx.observe(&multi_workspace, |this, _, cx| this.follow_workspace(cx));
+        panel.update(cx, |panel, cx| panel.set_hosted(true, cx));
+
         let _panel_subscription = cx.observe(&panel, |_, _, cx| cx.notify());
+        // Both hosted views belong to the editor window. When that closes there is nothing left
+        // to show, and holding its multi-workspace would keep a whole dead window's state alive.
+        let _editor_window_subscription =
+            cx.observe_release_in(&multi_workspace, window, |_, _, window, _| {
+                window.remove_window();
+            });
 
         Self {
             multi_workspace,
@@ -209,6 +245,7 @@ impl IdeaAgentWindow {
             threads_side: ThreadsSide::Left,
             _panel_subscription,
             _multi_workspace_subscription,
+            _editor_window_subscription,
         }
     }
 
@@ -234,7 +271,7 @@ impl IdeaAgentWindow {
     ///
     /// Three `IconButton`s rather than a `ToggleButtonGroup`, which always draws its labels — the
     /// icons already say left, right and closed.
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let side = self.threads_side;
         let button = |id: &'static str, tooltip: &'static str, icon, which| {
             IconButton::new(id, icon)
@@ -250,12 +287,16 @@ impl IdeaAgentWindow {
         h_flex()
             .flex_none()
             .w_full()
-            .h_9()
+            // The same height the editor window's title bar computes for itself, so the two line
+            // up when the windows sit side by side.
+            // Borders are drawn inside the height, so a `border_b_1` here would leave the
+            // coloured band a pixel shorter than the editor window's title bar. The seam is a
+            // sibling below instead.
+            .h(platform_title_bar_height(window))
+            .bg(cx.theme().colors().title_bar_background)
             .pl(TRAFFIC_LIGHT_INSET)
             .pr_2()
             .justify_between()
-            .border_b_1()
-            .border_color(cx.theme().colors().border)
             .child(
                 Label::new(VERSION)
                     .size(LabelSize::XSmall)
@@ -302,6 +343,9 @@ impl IdeaAgentWindow {
             .w_px()
             .h_full()
             .flex_none()
+            // Pulled one pixel over the threads pane: `Sidebar` draws a border down its own inner
+            // edge, so a divider placed beside it reads as a two-pixel seam. Ours covers it.
+            .map(|this| if from_left { this.ml(px(-1.)) } else { this.mr(px(-1.)) })
             .bg(cx.theme().colors().border)
             .child(
                 div()
@@ -334,14 +378,17 @@ impl IdeaAgentWindow {
 }
 
 impl Render for IdeaAgentWindow {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let threads = self.threads.clone();
         let panel = div().flex_1().min_w_0().h_full().child(self.panel.clone());
 
         v_flex()
             .size_full()
-            .bg(cx.theme().colors().panel_background)
-            .child(self.render_header(cx))
+            .bg(cx.theme().colors().background)
+            .child(self.render_header(window, cx))
+            // `Border`, not the default `BorderVariant`: the faded variant does not read
+            // against the title bar background, where the editor window's seam plainly does.
+            .child(Divider::horizontal().color(DividerColor::Border))
             .child(h_flex().flex_1().min_h_0().map(|this| {
                 match self.threads_side {
                     ThreadsSide::Hidden => this.child(panel),

@@ -2615,6 +2615,8 @@ impl Workspace {
         self.multi_workspace.as_ref()
     }
 
+    // idea-zed: the agent and git windows drive a workspace from outside its own window, where
+    // the usual `window.window_handle().downcast()` returns `None`.
     /// The window that owns this workspace, for opening, switching or closing another one.
     ///
     /// Normally the window the request came from, since a workspace is displayed by its own

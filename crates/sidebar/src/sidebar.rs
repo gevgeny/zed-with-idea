@@ -727,6 +727,19 @@ fn create_worktree_in_workspace(
     });
 }
 
+// idea-zed: added so the agent window's sidebar can load a thread without touching the dock.
+/// What loading a thread should do with the agent panel's dock.
+///
+/// A sidebar rendered in the window that owns the workspace wants the panel brought forward. One
+/// hosted by another window does not: revealing the panel there makes it the active panel of its
+/// dock and opens the dock, replacing whatever the user had in it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelReveal {
+    Focus,
+    Reveal,
+    Leave,
+}
+
 /// The sidebar re-derives its entire entry list from scratch on every
 /// change via `update_entries` → `rebuild_contents`. Avoid adding
 /// incremental or inter-event coordination state — if something can
@@ -789,6 +802,9 @@ pub struct Sidebar {
     /// Display names of other release channels that have threads available to
     /// import.
     cross_channel_import_channels: Vec<SharedString>,
+    // idea-zed: hides the controls that only work inside a workspace window, and stops thread
+    // activation from opening the dock, for the agent window that renders this sidebar.
+    hosted: bool,
 }
 
 impl Sidebar {
@@ -920,13 +936,28 @@ impl Sidebar {
             update_task: None,
             import_banners_use_verbose_labels: None,
             cross_channel_import_channels: Vec::new(),
+            hosted: false,
         };
 
-        // `active_entry` is otherwise only ever set in response to an event, so a sidebar built
-        // after the window has already settled — rather than alongside it at startup — would
-        // highlight nothing until the user switched workspaces.
+        // idea-zed: the agent window builds a sidebar after startup, which misses the events
+        // that would otherwise be the only thing to ever set `active_entry`.
         this.sync_active_entry_from_active_workspace(cx);
         this
+    }
+
+    // idea-zed: marks this sidebar as rendered outside the editor window, by the agent window.
+    // Revealing the panel from there would open the dock over whatever the user had in it, and
+    // the sidebar's own toggle acts on a sidebar that window does not have.
+    pub fn set_hosted(&mut self, hosted: bool) {
+        self.hosted = hosted;
+    }
+
+    fn panel_reveal(&self) -> PanelReveal {
+        if self.hosted {
+            PanelReveal::Leave
+        } else {
+            PanelReveal::Focus
+        }
     }
 
     fn serialize(&mut self, cx: &mut Context<Self>) {
@@ -3601,7 +3632,7 @@ impl Sidebar {
     fn load_agent_thread_in_workspace(
         workspace: &Entity<Workspace>,
         metadata: &ThreadMetadata,
-        focus: bool,
+        reveal: PanelReveal,
         window: &mut Window,
         cx: &mut App,
     ) {
@@ -3632,13 +3663,15 @@ impl Sidebar {
         });
 
         if let Some(agent_panel) = existing_panel {
-            load_thread(agent_panel, metadata, focus, window, cx);
-            workspace.update(cx, |workspace, cx| {
-                if focus {
+            load_thread(agent_panel, metadata, reveal == PanelReveal::Focus, window, cx);
+            workspace.update(cx, |workspace, cx| match reveal {
+                PanelReveal::Focus => {
                     workspace.focus_panel::<AgentPanel>(window, cx);
-                } else {
+                }
+                PanelReveal::Reveal => {
                     workspace.reveal_panel::<AgentPanel>(window, cx);
                 }
+                PanelReveal::Leave => {}
             });
             return;
         }
@@ -3654,11 +3687,15 @@ impl Sidebar {
                     workspace.add_panel(panel.clone(), window, cx);
                     panel.clone()
                 });
-                load_thread(panel, &metadata, focus, window, cx);
-                if focus {
-                    workspace.focus_panel::<AgentPanel>(window, cx);
-                } else {
-                    workspace.reveal_panel::<AgentPanel>(window, cx);
+                load_thread(panel, &metadata, reveal == PanelReveal::Focus, window, cx);
+                match reveal {
+                    PanelReveal::Focus => {
+                        workspace.focus_panel::<AgentPanel>(window, cx);
+                    }
+                    PanelReveal::Reveal => {
+                        workspace.reveal_panel::<AgentPanel>(window, cx);
+                    }
+                    PanelReveal::Leave => {}
                 }
             })?;
 
@@ -3857,9 +3894,11 @@ impl Sidebar {
         };
 
         if self.is_thread_active_in_workspace(&metadata.thread_id, workspace, cx) {
-            workspace.update(cx, |workspace, cx| {
-                workspace.focus_panel::<AgentPanel>(window, cx);
-            });
+            if !self.hosted {
+                workspace.update(cx, |workspace, cx| {
+                    workspace.focus_panel::<AgentPanel>(window, cx);
+                });
+            }
             return;
         }
 
@@ -3881,7 +3920,7 @@ impl Sidebar {
             }
         });
 
-        Self::load_agent_thread_in_workspace(workspace, metadata, true, window, cx);
+        Self::load_agent_thread_in_workspace(workspace, metadata, self.panel_reveal(), window, cx);
 
         self.update_entries(cx);
     }
@@ -3901,7 +3940,13 @@ impl Sidebar {
             .update(cx, |multi_workspace, window, cx| {
                 window.activate_window();
                 multi_workspace.activate(workspace.clone(), None, window, cx);
-                Self::load_agent_thread_in_workspace(&workspace, &metadata, true, window, cx);
+                Self::load_agent_thread_in_workspace(
+                    &workspace,
+                    &metadata,
+                    PanelReveal::Focus,
+                    window,
+                    cx,
+                );
             })
             .log_err()
             .is_some();
@@ -4448,7 +4493,13 @@ impl Sidebar {
                     workspace: workspace.clone(),
                 });
                 self.activate_workspace(&workspace, window, cx);
-                Self::load_agent_thread_in_workspace(&workspace, metadata, true, window, cx);
+                Self::load_agent_thread_in_workspace(
+                    &workspace,
+                    metadata,
+                    self.panel_reveal(),
+                    window,
+                    cx,
+                );
                 true
             }
             ActivatableEntry::Terminal {
@@ -5897,7 +5948,17 @@ impl Sidebar {
                     workspace: workspace.clone(),
                 });
                 self.update_entries(cx);
-                Self::load_agent_thread_in_workspace(workspace, metadata, false, window, cx);
+                Self::load_agent_thread_in_workspace(
+                    workspace,
+                    metadata,
+                    if self.hosted {
+                        PanelReveal::Leave
+                    } else {
+                        PanelReveal::Reveal
+                    },
+                    window,
+                    cx,
+                );
             }
             ThreadSwitcherSelection::Terminal {
                 metadata,
@@ -5945,7 +6006,13 @@ impl Sidebar {
                 });
                 self.update_entries(cx);
                 self.dismiss_thread_switcher(cx);
-                Self::load_agent_thread_in_workspace(workspace, metadata, true, window, cx);
+                Self::load_agent_thread_in_workspace(
+                    workspace,
+                    metadata,
+                    self.panel_reveal(),
+                    window,
+                    cx,
+                );
             }
             ThreadSwitcherSelection::Terminal {
                 metadata,
@@ -6039,7 +6106,11 @@ impl Sidebar {
                                 Self::load_agent_thread_in_workspace(
                                     original_ws,
                                     metadata,
-                                    false,
+                                    if this.hosted {
+                                        PanelReveal::Leave
+                                    } else {
+                                        PanelReveal::Reveal
+                                    },
                                     window,
                                     cx,
                                 );
@@ -7207,11 +7278,14 @@ impl Sidebar {
         let has_query = self.has_filter_query(cx);
         let sidebar_on_left = self.side(cx) == SidebarSide::Left;
         let sidebar_on_right = self.side(cx) == SidebarSide::Right;
-        let not_fullscreen = !window.is_fullscreen();
-        let traffic_lights = cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
-        let left_window_controls = !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_left;
+        // idea-zed: `!self.hosted` — the agent window draws its own titlebar strip, so this
+        // header must not also reserve room for the traffic lights or the window controls.
+        let owns_window_chrome = !window.is_fullscreen() && !self.hosted;
+        let traffic_lights = cfg!(target_os = "macos") && owns_window_chrome && sidebar_on_left;
+        let left_window_controls =
+            !cfg!(target_os = "macos") && owns_window_chrome && sidebar_on_left;
         let right_window_controls =
-            !cfg!(target_os = "macos") && not_fullscreen && sidebar_on_right;
+            !cfg!(target_os = "macos") && owns_window_chrome && sidebar_on_right;
         let header_height = platform_title_bar_height(window);
 
         h_flex()
@@ -7354,7 +7428,10 @@ impl Sidebar {
             .when(on_right, |this| this.flex_row_reverse())
             .border_t_1()
             .border_color(cx.theme().colors().border)
-            .child(self.render_sidebar_toggle_button(cx))
+            // idea-zed: toggles the editor window's sidebar, which the agent window cannot reach.
+            .when(!self.hosted, |this| {
+                this.child(self.render_sidebar_toggle_button(cx))
+            })
             .child(
                 IconButton::new("history", IconName::Clock)
                     .icon_size(IconSize::Small)
@@ -7561,14 +7638,18 @@ impl Sidebar {
 
         let agent_connection_store = agent_panel.read(cx).connection_store().downgrade();
 
+        let hosted = self.hosted;
         let archive_view = cx.new(|cx| {
-            ThreadsArchiveView::new(
+            let mut view = ThreadsArchiveView::new(
                 active_workspace.downgrade(),
                 agent_connection_store.clone(),
                 agent_server_store.clone(),
                 window,
                 cx,
-            )
+            );
+            // idea-zed: the archive replaces this sidebar in place, so it inherits its host.
+            view.set_hosted(hosted);
+            view
         });
 
         let subscription = cx.subscribe_in(

@@ -1282,6 +1282,7 @@ impl MultiWorkspace {
         })
     }
 
+    // idea-zed: lets a view hosted by another window find the window this belongs to.
     /// The window this multi-workspace lives in.
     pub fn window(&self, cx: &App) -> Option<WindowHandle<MultiWorkspace>> {
         cx.windows()
@@ -1290,6 +1291,8 @@ impl MultiWorkspace {
             .find(|handle| handle.window_id() == self.window_id)
     }
 
+    // idea-zed: without the fallback, opening a workspace from the agent window opened a whole
+    // new Zed window instead of switching this one.
     /// The window a workspace opened from here belongs in.
     ///
     /// Normally that is the window the request came from, but a view hosted in some other window

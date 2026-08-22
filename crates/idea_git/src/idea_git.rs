@@ -41,12 +41,12 @@ use settings::Settings as _;
 // `git::status::DiffStat` is the number pair; `ui::DiffStat` is the element that shows it.
 use ui::{
     ButtonLike, ButtonSize, ButtonStyle, Checkbox, ContextMenu, DiffStat as DiffStatElement,
-    Divider, ElevationIndex, Icon, IconButton, IconPosition, Label, ListItem, ListItemSpacing,
+    Divider, DividerColor, ElevationIndex, Icon, IconButton, IconPosition, Label, ListItem, ListItemSpacing,
     PopoverMenu, PopoverMenuHandle, ScrollAxes, Scrollbars, SplitButton, ToggleState, Tooltip,
-    WithScrollbar, h_flex, prelude::*, v_flex,
+    WithScrollbar, h_flex, prelude::*, utils::platform_title_bar_height, v_flex,
 };
 use util::ResultExt as _;
-use workspace::Workspace;
+use workspace::{MultiWorkspace, Workspace};
 
 actions!(
     idea_git,
@@ -119,21 +119,30 @@ pub fn init(cx: &mut App) {
 
 fn register(workspace: &mut Workspace, _window: Option<&mut Window>, _: &mut Context<Workspace>) {
     workspace.register_action(move |workspace, _: &Toggle, _window, cx| {
-        let project = workspace.project().clone();
-        let workspace = cx.entity().downgrade();
-        toggle_window(workspace, project, cx);
+        let Some(multi_workspace) = workspace
+            .multi_workspace()
+            .and_then(|multi_workspace| multi_workspace.upgrade())
+        else {
+            return;
+        };
+        toggle_window(multi_workspace, cx);
     });
 }
 
-/// Opens the window for this project, or brings the existing one forward. One window per project,
-/// found by asking the app for its windows and matching on the project entity — the same lookup
-/// the settings window uses to keep itself unique.
-fn toggle_window(workspace: WeakEntity<Workspace>, project: Entity<Project>, cx: &mut App) {
+/// Opens the window for this editor window, or brings the existing one forward. One window per
+/// editor window rather than per project: the editor switches between workspaces in place, and the
+/// window follows it, so keying on the project would strand a window on the workspace it opened
+/// against.
+fn toggle_window(multi_workspace: Entity<MultiWorkspace>, cx: &mut App) {
     let existing = cx
         .windows()
         .into_iter()
         .filter_map(|window| window.downcast::<IdeaGitWindow>())
-        .find(|window| window.read(cx).is_ok_and(|git| git.project == project));
+        .find(|window| {
+            window
+                .read(cx)
+                .is_ok_and(|git| git.multi_workspace == multi_workspace)
+        });
 
     if let Some(existing) = existing {
         existing
@@ -166,7 +175,7 @@ fn toggle_window(workspace: WeakEntity<Workspace>, project: Entity<Project>, cx:
                 ..Default::default()
             },
             |window, cx| {
-                let view = cx.new(|cx| IdeaGitWindow::new(workspace, project, window, cx));
+                let view = cx.new(|cx| IdeaGitWindow::new(multi_workspace, window, cx));
                 // Focusing the window is not the same as focusing something in it; without this
                 // the first keypress goes nowhere until the user clicks.
                 window.focus(&view.focus_handle(cx), cx);
@@ -178,6 +187,11 @@ fn toggle_window(workspace: WeakEntity<Workspace>, project: Entity<Project>, cx:
 }
 
 pub struct IdeaGitWindow {
+    /// The editor window this one belongs to. Also what tells one git window from another when
+    /// the action fires again.
+    multi_workspace: Entity<MultiWorkspace>,
+    /// Whichever workspace that editor window is currently showing, not the one it opened
+    /// against — switching worktrees switches the project, and with it the repository.
     workspace: WeakEntity<Workspace>,
     project: Entity<Project>,
     /// `None` when the project has no git repository, which shows as an empty list.
@@ -215,42 +229,42 @@ pub struct IdeaGitWindow {
     signoff: bool,
     skip_hooks: bool,
     commit_menu_handle: PopoverMenuHandle<ContextMenu>,
-    _subscriptions: Vec<Subscription>,
+    _multi_workspace_subscription: Subscription,
+    /// Rebuilt whenever the project is swapped, since a git store belongs to one.
+    _git_subscription: Subscription,
+    _editor_window_subscription: Subscription,
 }
 
 impl IdeaGitWindow {
     fn new(
-        workspace: WeakEntity<Workspace>,
-        project: Entity<Project>,
+        multi_workspace: Entity<MultiWorkspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        let project = workspace.read(cx).project().clone();
         let repository = project.read(cx).active_repository(cx);
         let preview = cx.new(|cx| DiffPreview::new(project.clone(), window, cx));
 
-        let mut subscriptions = Vec::new();
-
-        // A window outlives the repository it was opened against — a branch switch or a change of
-        // active repository would otherwise leave it showing a stale tree forever. A modal never
-        // lived long enough for this to matter.
-        let git_store = project.read(cx).git_store().clone();
-        subscriptions.push(cx.subscribe_in(
-            &git_store,
+        // The editor switches workspaces in place — activating a thread from another worktree
+        // does exactly that — and every git thing here belongs to a project. Without this the
+        // window keeps showing the diff of the worktree it was opened from.
+        let _multi_workspace_subscription = cx.observe_in(
+            &multi_workspace,
             window,
-            |this, _, event: &GitStoreEvent, window, cx| match event {
-                GitStoreEvent::ActiveRepositoryChanged(_) => {
-                    this.follow_active_repository(window, cx)
-                }
-                GitStoreEvent::RepositoryUpdated(_, RepositoryEvent::StatusesChanged, true) => {
-                    this.reload_entries(cx);
-                    cx.notify();
-                }
-                _ => {}
-            },
-        ));
+            |this, _, window, cx| this.follow_workspace(window, cx),
+        );
+        let _git_subscription = Self::watch_git_store(&project, window, cx);
+        // Everything here belongs to the editor window. When that closes there is nothing left to
+        // show, and holding its multi-workspace would keep a whole dead window's state alive.
+        let _editor_window_subscription =
+            cx.observe_release_in(&multi_workspace, window, |_, _, window, _| {
+                window.remove_window();
+            });
 
         let mut this = Self {
-            workspace,
+            multi_workspace,
+            workspace: workspace.downgrade(),
             project,
             repository,
             focus_handle: cx.focus_handle(),
@@ -271,11 +285,61 @@ impl IdeaGitWindow {
             signoff: false,
             skip_hooks: false,
             commit_menu_handle: PopoverMenuHandle::default(),
-            _subscriptions: subscriptions,
+            _multi_workspace_subscription,
+            _git_subscription,
+            _editor_window_subscription,
         };
         this.reload_entries(cx);
         this.open_commit_buffer(window, cx);
         this
+    }
+
+    /// Watches one project's git store.
+    ///
+    /// A window outlives the repository it was opened against — a branch switch or a change of
+    /// active repository would otherwise leave it showing a stale tree forever. A modal never
+    /// lived long enough for this to matter.
+    fn watch_git_store(
+        project: &Entity<Project>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        let git_store = project.read(cx).git_store().clone();
+        cx.subscribe_in(
+            &git_store,
+            window,
+            |this, _, event: &GitStoreEvent, window, cx| match event {
+                GitStoreEvent::ActiveRepositoryChanged(_) => {
+                    this.follow_active_repository(window, cx)
+                }
+                GitStoreEvent::RepositoryUpdated(_, RepositoryEvent::StatusesChanged, true) => {
+                    this.reload_entries(cx);
+                    cx.notify();
+                }
+                _ => {}
+            },
+        )
+    }
+
+    /// Follows the editor window from one workspace to another.
+    ///
+    /// Everything shown here — repository, diff, commit message — belongs to a project, so
+    /// switching worktrees has to replace all of it rather than leave the previous worktree's
+    /// changes on screen.
+    fn follow_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self.multi_workspace.read(cx).workspace().clone();
+        let project = workspace.read(cx).project().clone();
+        if project == self.project {
+            return;
+        }
+
+        self.workspace = workspace.downgrade();
+        self.project = project.clone();
+        self._git_subscription = Self::watch_git_store(&project, window, cx);
+        self.preview = cx.new(|cx| DiffPreview::new(project.clone(), window, cx));
+        let repository = project.read(cx).active_repository(cx);
+        self.adopt_repository(repository, window, cx);
+        cx.notify();
     }
 
     /// Repoints the window at whichever repository is now active, and reloads from it.
@@ -284,6 +348,16 @@ impl IdeaGitWindow {
         if repository == self.repository {
             return;
         }
+        self.adopt_repository(repository, window, cx);
+    }
+
+    /// Shows a repository, discarding everything that described the last one.
+    fn adopt_repository(
+        &mut self,
+        repository: Option<Entity<Repository>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.repository = repository;
         self.collapsed_dirs.clear();
         self.selected_index = 0;
@@ -485,7 +559,10 @@ impl IdeaGitWindow {
         v_flex()
             .child(
                 h_flex()
-                    .h_9()
+                    // The same height the editor window's title bar computes for itself, so the
+                    // two line up when the windows sit side by side.
+                    .h(platform_title_bar_height(window))
+                    .bg(cx.theme().colors().title_bar_background)
                     .px_2p5()
                     .gap_1()
                     .flex_none()
@@ -493,7 +570,9 @@ impl IdeaGitWindow {
                     .justify_end()
                     .children(self.render_header_controls(window, cx)),
             )
-            .child(Divider::horizontal())
+            // `Border`, not the default `BorderVariant`: over the panel background the faded
+            // variant barely reads, where the editor window's own header seam is plainly there.
+            .child(Divider::horizontal().color(DividerColor::Border))
     }
 
     fn reload_entries(&mut self, cx: &mut App) {
@@ -762,7 +841,7 @@ impl IdeaGitWindow {
             })
             .filter(|paths| !paths.is_empty());
 
-        let askpass = self.askpass_delegate("git commit", window, cx);
+        let askpass = self.askpass_delegate("git commit", cx);
         let options = git::repository::CommitOptions {
             amend: self.amend,
             signoff: self.signoff,
@@ -824,7 +903,7 @@ impl IdeaGitWindow {
         let remotes = repository.update(cx, |repository, _| {
             repository.get_remotes(Some(branch.name().to_string()), true)
         });
-        let askpass = self.askpass_delegate("git push", window, cx);
+        let askpass = self.askpass_delegate("git push", cx);
 
         self.pushing = true;
         cx.notify();
@@ -862,16 +941,22 @@ impl IdeaGitWindow {
     }
 
     /// Git may need a passphrase or credentials part-way through. The prompt is a workspace
-    /// modal, so it takes this one's place; answering it lets the commit finish.
+    /// modal, so it appears over the editor window rather than this one; answering it there lets
+    /// the commit finish.
     fn askpass_delegate(
         &self,
         operation: &'static str,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> askpass::AskPassDelegate {
         let workspace = self.workspace.clone();
-        let window = window.window_handle();
+        // The editor window's, not ours: a workspace modal is rendered by the window that renders
+        // the workspace, so prompting through this one leaves a push waiting on a prompt that is
+        // never drawn.
+        let window = self.multi_workspace.read(cx).window(cx);
         askpass::AskPassDelegate::new(&mut cx.to_async(), move |prompt, tx, cx| {
+            let Some(window) = window else {
+                return;
+            };
             window
                 .update(cx, |_, window, cx| {
                     workspace
@@ -902,13 +987,17 @@ impl IdeaGitWindow {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
+        let Some(editor_window) = self.multi_workspace.read(cx).window(cx) else {
+            return;
+        };
 
         cx.spawn_in(window, async move |_, cx| {
-            workspace
-                .update_in(cx, |workspace, window, cx| {
+            let open = editor_window.update(cx, |_, window, cx| {
+                workspace.update(cx, |workspace, cx| {
                     workspace.open_path(path, None, true, window, cx)
-                })?
-                .await?;
+                })
+            })?;
+            open.await?;
             anyhow::Ok(())
         })
         .detach_and_log_err(cx);
@@ -1559,7 +1648,7 @@ async fn load_diff(
 }
 
 impl Render for DiffPreview {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let steppable = self.message.is_none() && self.has_hunks_to_step_through;
         let body = match self.message.clone() {
             Some(message) => v_flex()
@@ -1578,12 +1667,13 @@ impl Render for DiffPreview {
         v_flex()
             .size_full()
             .bg(cx.theme().colors().editor_background)
-            // `h_9` then a divider, rather than a bottom border on the row itself: the border
-            // would sit inside the 36px and leave this header a pixel shorter than the filter
-            // bar, which is built exactly this way.
+            // A divider after the row rather than a bottom border on it: a border is drawn
+            // inside the height, which would leave this header a pixel shorter than the tree's
+            // and put the two lines at different heights.
             .child(
                 h_flex()
-                    .h_9()
+                    .h(platform_title_bar_height(window))
+                    .bg(cx.theme().colors().title_bar_background)
                     .px_2p5()
                     .gap_1()
                     .flex_none()
@@ -1623,7 +1713,9 @@ impl Render for DiffPreview {
                         )
                     }),
             )
-            .child(Divider::horizontal())
+            // `Border`, not the default `BorderVariant`: over the panel background the faded
+            // variant barely reads, where the editor window's own header seam is plainly there.
+            .child(Divider::horizontal().color(DividerColor::Border))
             .child(div().flex_1().min_h_0().child(body))
     }
 }

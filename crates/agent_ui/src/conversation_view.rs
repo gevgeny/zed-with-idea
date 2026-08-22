@@ -2995,6 +2995,7 @@ impl ConversationView {
                 .push(cx.subscribe_in(&pop_up, window, {
                     move |this, _, event, window, cx| match event {
                         AgentNotificationEvent::Accepted => {
+                            // idea-zed: may be rendered by the agent window rather than the dock.
                             let Some(handle) = this
                                 .workspace
                                 .read_with(cx, |workspace, cx| {
