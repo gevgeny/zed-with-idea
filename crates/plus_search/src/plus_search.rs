@@ -43,7 +43,7 @@ use util::{
 use workspace::{ModalView, Workspace, searchable::SearchableItem as _};
 
 actions!(
-    idea_search,
+    plus_search,
     [
         /// Opens the project-wide search modal.
         Toggle
@@ -160,11 +160,11 @@ const TOGGLEABLE_OPTIONS: [SearchOption; 4] = [
 ];
 
 pub fn init(cx: &mut App) {
-    cx.observe_new(IdeaSearch::register).detach();
+    cx.observe_new(PlusSearch::register).detach();
 }
 
-pub struct IdeaSearch {
-    picker: Entity<Picker<IdeaSearchDelegate>>,
+pub struct PlusSearch {
+    picker: Entity<Picker<PlusSearchDelegate>>,
     /// Wraps the picker, the filter inputs and the preview. The picker dismisses itself whenever
     /// its query input blurs, so it needs a way to ask whether focus merely moved elsewhere
     /// inside the modal; this handle answers that for every part at once.
@@ -172,7 +172,7 @@ pub struct IdeaSearch {
     _filter_subscriptions: Vec<Subscription>,
 }
 
-impl IdeaSearch {
+impl PlusSearch {
     fn register(
         workspace: &mut Workspace,
         _window: Option<&mut Window>,
@@ -194,7 +194,7 @@ impl IdeaSearch {
                 .filter(|query| !query.is_empty());
 
             workspace.toggle_modal(window, cx, move |window, cx| {
-                IdeaSearch::new(handle, project, seed, window, cx)
+                PlusSearch::new(handle, project, seed, window, cx)
             });
         });
     }
@@ -228,7 +228,7 @@ impl IdeaSearch {
         let include_editor_handle = include_editor.clone();
         let exclude_editor_handle = exclude_editor.clone();
         let focus_handle = cx.focus_handle();
-        let delegate = IdeaSearchDelegate {
+        let delegate = PlusSearchDelegate {
             modal: cx.entity().downgrade(),
             modal_focus_handle: focus_handle.clone(),
             workspace,
@@ -290,7 +290,7 @@ impl IdeaSearch {
     }
 }
 
-impl IdeaSearch {
+impl PlusSearch {
     /// First escape empties the query, second closes the modal. The picker consumes
     /// `menu::Cancel` itself, so this has to run in the capture phase to get there first.
     fn cancel(&mut self, _: &menu::Cancel, window: &mut Window, cx: &mut Context<Self>) {
@@ -333,29 +333,29 @@ impl IdeaSearch {
     }
 }
 
-impl Render for IdeaSearch {
+impl Render for PlusSearch {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sync_preview_layout(window, cx);
 
         // No width here: the picker owns its size (see `initial_width`), and a second width on
         // the wrapper clips whatever the picker lays out wider — the trailing controls first.
         v_flex()
-            .key_context("IdeaSearch")
+            .key_context("PlusSearch")
             .track_focus(&self.focus_handle)
             .capture_action(cx.listener(Self::cancel))
             .child(self.picker.clone())
     }
 }
 
-impl Focusable for IdeaSearch {
+impl Focusable for PlusSearch {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.picker.focus_handle(cx)
     }
 }
 
-impl EventEmitter<DismissEvent> for IdeaSearch {}
+impl EventEmitter<DismissEvent> for PlusSearch {}
 
-impl ModalView for IdeaSearch {}
+impl ModalView for PlusSearch {}
 
 /// One row: a single match, with enough context to render it and to open it later.
 struct SearchMatch {
@@ -377,10 +377,10 @@ struct SearchMatch {
     point_range: Range<text::Point>,
 }
 
-pub struct IdeaSearchDelegate {
+pub struct PlusSearchDelegate {
     /// The picker reports dismissal to its delegate; the modal only closes once that is passed
     /// on as a `DismissEvent`.
-    modal: WeakEntity<IdeaSearch>,
+    modal: WeakEntity<PlusSearch>,
     /// The modal's focus handle, for telling the picker that focus is still inside it.
     modal_focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
@@ -413,7 +413,7 @@ fn filter_editor(
     placeholder: &str,
     initial: &str,
     window: &mut Window,
-    cx: &mut Context<IdeaSearch>,
+    cx: &mut Context<PlusSearch>,
 ) -> Entity<Editor> {
     cx.new(|cx| {
         let mut editor = Editor::single_line(window, cx);
@@ -423,7 +423,7 @@ fn filter_editor(
     })
 }
 
-impl IdeaSearchDelegate {
+impl PlusSearchDelegate {
     fn render_summary(&self) -> Option<Label> {
         if self.matches.is_empty() {
             return None;
@@ -464,7 +464,7 @@ impl IdeaSearchDelegate {
                 let options = option.as_options();
                 let picker = picker.clone();
 
-                IconButton::new(("idea-search-option", option as usize), option.icon())
+                IconButton::new(("plus-search-option", option as usize), option.icon())
                     .icon_size(IconSize::Small)
                     .toggle_state(active.contains(options))
                     .tooltip(Tooltip::text(option.label()))
@@ -706,11 +706,11 @@ fn ceil_boundary(text: &str, mut index: usize) -> usize {
     index
 }
 
-impl PickerDelegate for IdeaSearchDelegate {
+impl PickerDelegate for PlusSearchDelegate {
     type ListItem = ListItem;
 
     fn name() -> &'static str {
-        "IdeaSearch"
+        "PlusSearch"
     }
 
     fn placeholder_text(&self, _window: &mut Window, _cx: &mut App) -> Arc<str> {
@@ -946,7 +946,7 @@ impl PickerDelegate for IdeaSearchDelegate {
         let settings_active = self.settings_expanded
             || !self.filters(cx).is_empty()
             || self.search_options != SearchOptions::NONE;
-        let settings_toggle = IconButton::new("idea-search-settings", IconName::Settings)
+        let settings_toggle = IconButton::new("plus-search-settings", IconName::Settings)
             .icon_size(IconSize::Small)
             .toggle_state(settings_active)
             .tooltip(Tooltip::text("Search Settings"))
@@ -968,7 +968,7 @@ impl PickerDelegate for IdeaSearchDelegate {
         // Reflects the user's choice rather than the current layout, which is also hidden while
         // there is nothing to preview.
         let preview_enabled = self.preview_enabled;
-        let preview_toggle = IconButton::new("idea-search-preview-toggle", IconName::Eye)
+        let preview_toggle = IconButton::new("plus-search-preview-toggle", IconName::Eye)
             .icon_size(IconSize::Small)
             .toggle_state(preview_enabled)
             .tooltip(Tooltip::text("Toggle Preview"))

@@ -775,7 +775,7 @@ fn create_worktree_workspace_inner(
     let previous_state =
         workspace.capture_state_for_worktree_switch(window, fallback_focused_dock, cx);
     let workspace_handle = workspace.weak_handle();
-    // idea-zed: driven from the git window, whose own window is not a multi-workspace.
+    // zed-plus: driven from the git window, whose own window is not a multi-workspace.
     let window_handle = workspace.multi_workspace_window(window, cx);
     let remote_connection_options = project.read(cx).remote_connection_options(cx);
 
@@ -911,7 +911,7 @@ pub fn handle_switch_worktree(
     let previous_state =
         workspace.capture_state_for_worktree_switch(window, fallback_focused_dock, cx);
     let workspace_handle = workspace.weak_handle();
-    // idea-zed: driven from the git window, whose own window is not a multi-workspace.
+    // zed-plus: driven from the git window, whose own window is not a multi-workspace.
     let window_handle = workspace.multi_workspace_window(window, cx);
     let remote_connection_options = project.read(cx).remote_connection_options(cx);
 

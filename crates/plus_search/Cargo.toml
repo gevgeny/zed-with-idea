@@ -1,5 +1,5 @@
 [package]
-name = "idea_search"
+name = "plus_search"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/idea_search.rs"
+path = "src/plus_search.rs"
 doctest = false
 
 [dependencies]

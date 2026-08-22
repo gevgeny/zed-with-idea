@@ -1,5 +1,5 @@
 [package]
-name = "idea_agent"
+name = "plus_agent"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
@@ -9,7 +9,7 @@ license = "GPL-3.0-or-later"
 workspace = true
 
 [lib]
-path = "src/idea_agent.rs"
+path = "src/plus_agent.rs"
 doctest = false
 
 [dependencies]

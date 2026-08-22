@@ -49,7 +49,7 @@ use util::ResultExt as _;
 use workspace::{MultiWorkspace, Workspace};
 
 actions!(
-    idea_git,
+    plus_git,
     [
         /// Opens the git changes window.
         Toggle
@@ -137,7 +137,7 @@ fn toggle_window(multi_workspace: Entity<MultiWorkspace>, cx: &mut App) {
     let existing = cx
         .windows()
         .into_iter()
-        .filter_map(|window| window.downcast::<IdeaGitWindow>())
+        .filter_map(|window| window.downcast::<PlusGitWindow>())
         .find(|window| {
             window
                 .read(cx)
@@ -175,7 +175,7 @@ fn toggle_window(multi_workspace: Entity<MultiWorkspace>, cx: &mut App) {
                 ..Default::default()
             },
             |window, cx| {
-                let view = cx.new(|cx| IdeaGitWindow::new(multi_workspace, window, cx));
+                let view = cx.new(|cx| PlusGitWindow::new(multi_workspace, window, cx));
                 // Focusing the window is not the same as focusing something in it; without this
                 // the first keypress goes nowhere until the user clicks.
                 window.focus(&view.focus_handle(cx), cx);
@@ -186,7 +186,7 @@ fn toggle_window(multi_workspace: Entity<MultiWorkspace>, cx: &mut App) {
     });
 }
 
-pub struct IdeaGitWindow {
+pub struct PlusGitWindow {
     /// The editor window this one belongs to. Also what tells one git window from another when
     /// the action fires again.
     multi_workspace: Entity<MultiWorkspace>,
@@ -235,7 +235,7 @@ pub struct IdeaGitWindow {
     _editor_window_subscription: Subscription,
 }
 
-impl IdeaGitWindow {
+impl PlusGitWindow {
     fn new(
         multi_workspace: Entity<MultiWorkspace>,
         window: &mut Window,
@@ -478,7 +478,7 @@ impl IdeaGitWindow {
     fn render_list(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let selected = self.selected_index;
         uniform_list(
-            "idea-git-entries",
+            "plus-git-entries",
             self.rows.len(),
             cx.processor(move |this, range: std::ops::Range<usize>, window, cx| {
                 range
@@ -515,7 +515,7 @@ impl IdeaGitWindow {
     /// mouse events so a drag that strays over the list does not select a row.
     fn render_divider(&self, side_by_side: bool, cx: &mut Context<Self>) -> impl IntoElement {
         div()
-            .id("idea-git-divider")
+            .id("plus-git-divider")
             .flex_none()
             .bg(cx.theme().colors().border)
             .block_mouse_except_scroll()
@@ -1013,15 +1013,15 @@ impl IdeaGitWindow {
         let (amend, signoff, skip_hooks) = (self.amend, self.signoff, self.skip_hooks);
         let this = cx.entity();
 
-        PopoverMenu::new("idea-git-commit-menu")
+        PopoverMenu::new("plus-git-commit-menu")
             .trigger(split_button_chevron(
-                "idea-git-commit-menu-trigger",
+                "plus-git-commit-menu-trigger",
                 self.commit_menu_handle.is_deployed(),
             ))
             .with_handle(self.commit_menu_handle.clone())
             .anchor(gpui::Anchor::BottomRight)
             .menu(move |window, cx| {
-                let toggle = |_unused: &Entity<IdeaGitWindow>, apply: fn(&mut IdeaGitWindow)| {
+                let toggle = |_unused: &Entity<PlusGitWindow>, apply: fn(&mut PlusGitWindow)| {
                     let this = this.clone();
                     move |_: &mut Window, cx: &mut App| {
                         this.update(cx, |this, cx| {
@@ -1081,13 +1081,13 @@ impl IdeaGitWindow {
                 }))
                 .children(self.total_diff_stat().map(|total| {
                     DiffStatElement::new(
-                        "idea-git-total-diff-stat",
+                        "plus-git-total-diff-stat",
                         total.added as usize,
                         total.deleted as usize,
                     )
                 }))
                 .child(
-                    IconButton::new("idea-git-compress-directories", IconName::ListTree)
+                    IconButton::new("plus-git-compress-directories", IconName::ListTree)
                         .icon_size(IconSize::Small)
                         .toggle_state(!compress_directories)
                         .tooltip(Tooltip::text(if compress_directories {
@@ -1108,7 +1108,7 @@ impl IdeaGitWindow {
                 )
                 .child(
                     IconButton::new(
-                        "idea-git-collapse-all",
+                        "plus-git-collapse-all",
                         if collapse_all {
                             IconName::ChevronUpDown
                         } else {
@@ -1131,7 +1131,7 @@ impl IdeaGitWindow {
                     }),
                 )
                 .child(
-                    IconButton::new("idea-git-preview-toggle", IconName::Eye)
+                    IconButton::new("plus-git-preview-toggle", IconName::Eye)
                         .icon_size(IconSize::Small)
                         .toggle_state(preview_enabled)
                         .tooltip(Tooltip::text("Toggle Preview"))
@@ -1195,7 +1195,7 @@ impl IdeaGitWindow {
                         .child(div().flex_1())
                         .child(
                             action_button(
-                                ButtonLike::new("idea-git-stage-all"),
+                                ButtonLike::new("plus-git-stage-all"),
                                 if all_staged {
                                     "Unstage all"
                                 } else {
@@ -1216,7 +1216,7 @@ impl IdeaGitWindow {
                         .child(
                             SplitButton::new(
                                 action_button(
-                                    ButtonLike::new_rounded_left("idea-git-commit"),
+                                    ButtonLike::new_rounded_left("plus-git-commit"),
                                     commit_label,
                                     can_commit,
                                     ButtonStyle::Transparent,
@@ -1235,7 +1235,7 @@ impl IdeaGitWindow {
                         )
                         .child(
                             action_button(
-                                ButtonLike::new("idea-git-push"),
+                                ButtonLike::new("plus-git-push"),
                                 "Push",
                                 can_push,
                                 ButtonStyle::Outlined,
@@ -1387,7 +1387,7 @@ impl IdeaGitWindow {
     }
 }
 
-impl Render for IdeaGitWindow {
+impl Render for PlusGitWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Side by side while there is room for both, stacked when there is not — the same call a
         // media query makes, decided from the viewport each frame. Purely about width: whether
@@ -1408,7 +1408,7 @@ impl Render for IdeaGitWindow {
             .map(IntoElement::into_any_element);
 
         let tree = div()
-            .id("idea-git-tree")
+            .id("plus-git-tree")
             .track_focus(&self.focus_handle)
             .flex_1()
             .min_h_0()
@@ -1454,7 +1454,7 @@ impl Render for IdeaGitWindow {
             .child(self.preview.clone());
 
         v_flex()
-            .key_context("IdeaGit")
+            .key_context("PlusGit")
             .relative()
             .size_full()
             .bg(cx.theme().colors().background)
@@ -1476,7 +1476,7 @@ impl Render for IdeaGitWindow {
     }
 }
 
-impl Focusable for IdeaGitWindow {
+impl Focusable for PlusGitWindow {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
     }
@@ -1696,7 +1696,7 @@ impl Render for DiffPreview {
                     )
                     .when(steppable, |this| {
                         this.child(
-                            IconButton::new("idea-git-previous-hunk", IconName::ArrowUp)
+                            IconButton::new("plus-git-previous-hunk", IconName::ArrowUp)
                                 .icon_size(IconSize::Small)
                                 .tooltip(Tooltip::text("Previous Change"))
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -1704,7 +1704,7 @@ impl Render for DiffPreview {
                                 })),
                         )
                         .child(
-                            IconButton::new("idea-git-next-hunk", IconName::ArrowDown)
+                            IconButton::new("plus-git-next-hunk", IconName::ArrowDown)
                                 .icon_size(IconSize::Small)
                                 .tooltip(Tooltip::text("Next Change"))
                                 .on_click(cx.listener(|this, _, window, cx| {

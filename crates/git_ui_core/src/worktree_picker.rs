@@ -685,7 +685,7 @@ impl WorktreePickerDelegate {
         else {
             return;
         };
-        // idea-zed: may be driven from a window that is not the workspace's own.
+        // zed-plus: may be driven from a window that is not the workspace's own.
         let Some(window_handle) = workspace_to_remove
             .read(cx)
             .multi_workspace_window(window, cx)

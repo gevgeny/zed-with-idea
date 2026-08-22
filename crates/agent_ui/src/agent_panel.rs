@@ -1186,7 +1186,7 @@ pub struct AgentPanel {
     last_context_source: Option<AgentContextSource>,
 
     is_active: bool,
-    // idea-zed: hides the controls that only work inside a workspace window, for the agent
+    // zed-plus: hides the controls that only work inside a workspace window, for the agent
     // window that renders this panel outside the dock.
     hosted: bool,
 }
@@ -2705,7 +2705,7 @@ impl AgentPanel {
         let event_subscription = cx.subscribe_in(&pop_up, window, {
             move |this, _, event: &AgentNotificationEvent, window, cx| match event {
                 AgentNotificationEvent::Accepted => {
-                    // idea-zed: the panel may be rendered by the agent window rather than the dock.
+                    // zed-plus: the panel may be rendered by the agent window rather than the dock.
                     let Some(handle) = this
                         .workspace
                         .read_with(cx, |workspace, cx| {
@@ -3666,7 +3666,7 @@ impl AgentPanel {
         theme_settings::reset_agent_buffer_font_size(cx);
     }
 
-    // idea-zed: lets the agent window mark this panel as rendered outside the dock, so the
+    // zed-plus: lets the agent window mark this panel as rendered outside the dock, so the
     // controls that act on the dock or the editor window's sidebar are not offered there.
     pub fn set_hosted(&mut self, hosted: bool, cx: &mut Context<Self>) {
         self.hosted = hosted;
@@ -5613,7 +5613,7 @@ impl AgentPanel {
 
         let workspace = self.workspace.clone();
 
-        // idea-zed: read here because the menu builder below captures no `self`.
+        // zed-plus: read here because the menu builder below captures no `self`.
         let hosted = self.hosted;
 
         PopoverMenu::new("agent-options-menu")
@@ -5760,7 +5760,7 @@ impl AgentPanel {
 
                         menu = menu
                             .action("Settings", Box::new(OpenSettings))
-                            // idea-zed: this dispatches to the editor window's sidebar, which the
+                            // zed-plus: this dispatches to the editor window's sidebar, which the
                             // agent window has no way to reach.
                             .when(!hosted, |menu| {
                                 menu.separator().action(
@@ -6161,7 +6161,7 @@ impl AgentPanel {
                         .gap_1()
                         .children(sandbox_status)
                         .when(can_create_entries, |this| this.child(new_thread_menu))
-                        // idea-zed: zooming is a dock affordance; nothing listens to it in
+                        // zed-plus: zooming is a dock affordance; nothing listens to it in
                         // the agent window.
                         .when(!self.hosted, |this| this.child(full_screen_button))
                         .child(self.render_panel_options_menu(window, cx)),

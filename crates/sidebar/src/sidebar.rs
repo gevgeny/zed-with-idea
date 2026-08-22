@@ -727,7 +727,7 @@ fn create_worktree_in_workspace(
     });
 }
 
-// idea-zed: added so the agent window's sidebar can load a thread without touching the dock.
+// zed-plus: added so the agent window's sidebar can load a thread without touching the dock.
 /// What loading a thread should do with the agent panel's dock.
 ///
 /// A sidebar rendered in the window that owns the workspace wants the panel brought forward. One
@@ -802,7 +802,7 @@ pub struct Sidebar {
     /// Display names of other release channels that have threads available to
     /// import.
     cross_channel_import_channels: Vec<SharedString>,
-    // idea-zed: hides the controls that only work inside a workspace window, and stops thread
+    // zed-plus: hides the controls that only work inside a workspace window, and stops thread
     // activation from opening the dock, for the agent window that renders this sidebar.
     hosted: bool,
 }
@@ -939,13 +939,13 @@ impl Sidebar {
             hosted: false,
         };
 
-        // idea-zed: the agent window builds a sidebar after startup, which misses the events
+        // zed-plus: the agent window builds a sidebar after startup, which misses the events
         // that would otherwise be the only thing to ever set `active_entry`.
         this.sync_active_entry_from_active_workspace(cx);
         this
     }
 
-    // idea-zed: marks this sidebar as rendered outside the editor window, by the agent window.
+    // zed-plus: marks this sidebar as rendered outside the editor window, by the agent window.
     // Revealing the panel from there would open the dock over whatever the user had in it, and
     // the sidebar's own toggle acts on a sidebar that window does not have.
     pub fn set_hosted(&mut self, hosted: bool) {
@@ -7280,7 +7280,7 @@ impl Sidebar {
         let has_query = self.has_filter_query(cx);
         let sidebar_on_left = self.side(cx) == SidebarSide::Left;
         let sidebar_on_right = self.side(cx) == SidebarSide::Right;
-        // idea-zed: `!self.hosted` — the agent window draws its own titlebar strip, so this
+        // zed-plus: `!self.hosted` — the agent window draws its own titlebar strip, so this
         // header must not also reserve room for the traffic lights or the window controls.
         let owns_window_chrome = !window.is_fullscreen() && !self.hosted;
         let traffic_lights = cfg!(target_os = "macos") && owns_window_chrome && sidebar_on_left;
@@ -7430,7 +7430,7 @@ impl Sidebar {
             .when(on_right, |this| this.flex_row_reverse())
             .border_t_1()
             .border_color(cx.theme().colors().border)
-            // idea-zed: toggles the editor window's sidebar, which the agent window cannot reach.
+            // zed-plus: toggles the editor window's sidebar, which the agent window cannot reach.
             .when(!self.hosted, |this| {
                 this.child(self.render_sidebar_toggle_button(cx))
             })
@@ -7649,7 +7649,7 @@ impl Sidebar {
                 window,
                 cx,
             );
-            // idea-zed: the archive replaces this sidebar in place, so it inherits its host.
+            // zed-plus: the archive replaces this sidebar in place, so it inherits its host.
             view.set_hosted(hosted);
             view
         });

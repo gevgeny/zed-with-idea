@@ -687,9 +687,8 @@
     "context": "Workspace",
     "use_key_equivalents": true,
     "bindings": {
-      "cmd-alt-u": "idea_search::Toggle",
-      "cmd-alt-v": "idea_git::Toggle",
-      "cmd-alt-0": "idea_agent::Toggle",
+      "cmd-alt-u": "plus_agent::Toggle",
+      "cmd-alt-v": "plus_git::Toggle",
       // Move focus between the major regions of the window (editor, open
       // panels, status bar). Accessibility navigation; mirrors VS Code's
       // "Focus Next/Previous Part". `cmd-f6` mirrors `f6` so region navigation

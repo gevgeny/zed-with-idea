@@ -1,7 +1,6 @@
 //! The agent panel in a window of its own.
 //!
-//! Opened with cmd-alt-0, or ctrl-alt-9 elsewhere: ctrl-alt-0 is already
-//! `workspace::ResetActiveDockSize` on those platforms.
+//! Opened with cmd-alt-u, or ctrl-alt-u elsewhere.
 //!
 //! Kept in its own crate so it stays mergeable with upstream Zed. Nothing here reimplements
 //! either half of what it shows: `AgentPanel` and `Sidebar` are views, and a view can be rendered
@@ -27,7 +26,7 @@ use util::ResultExt as _;
 use workspace::{MultiWorkspace, SidebarHandle as _, Workspace, dock::Dock};
 
 actions!(
-    idea_agent,
+    plus_agent,
     [
         /// Opens the agent panel in its own window.
         Toggle
@@ -122,7 +121,7 @@ fn toggle_window(
     let existing = cx
         .windows()
         .into_iter()
-        .filter_map(|window| window.downcast::<IdeaAgentWindow>())
+        .filter_map(|window| window.downcast::<PlusAgentWindow>())
         .find(|window| {
             window
                 .read(cx)
@@ -166,7 +165,7 @@ fn toggle_window(
                 ..Default::default()
             },
             |window, cx| {
-                let view = cx.new(|cx| IdeaAgentWindow::new(multi_workspace, panel, window, cx));
+                let view = cx.new(|cx| PlusAgentWindow::new(multi_workspace, panel, window, cx));
                 // Focusing the window is not the same as focusing something in it; without this
                 // the first keypress goes nowhere until the user clicks.
                 window.focus(&view.focus_handle(cx), cx);
@@ -179,7 +178,7 @@ fn toggle_window(
 
 /// A host for two of Zed's own views, and nothing else. Everything the window can do, they
 /// already did.
-pub struct IdeaAgentWindow {
+pub struct PlusAgentWindow {
     /// The editor window this one belongs to. Also what tells one agent window from another when
     /// the action fires again.
     multi_workspace: Entity<MultiWorkspace>,
@@ -200,7 +199,7 @@ pub struct IdeaAgentWindow {
     _editor_window_subscription: Subscription,
 }
 
-impl IdeaAgentWindow {
+impl PlusAgentWindow {
     fn new(
         multi_workspace: Entity<MultiWorkspace>,
         panel: Entity<AgentPanel>,
@@ -306,19 +305,19 @@ impl IdeaAgentWindow {
                     .border_1()
                     .border_color(cx.theme().colors().border)
                     .child(button(
-                        "idea-agent-threads-left",
+                        "plus-agent-threads-left",
                         "Threads Left",
                         IconName::ThreadsSidebarLeftOpen,
                         ThreadsSide::Left,
                     ))
                     .child(button(
-                        "idea-agent-threads-hidden",
+                        "plus-agent-threads-hidden",
                         "Hide Threads",
                         IconName::ThreadsSidebarLeftClosed,
                         ThreadsSide::Hidden,
                     ))
                     .child(button(
-                        "idea-agent-threads-right",
+                        "plus-agent-threads-right",
                         "Threads Right",
                         IconName::ThreadsSidebarRightOpen,
                         ThreadsSide::Right,
@@ -345,7 +344,7 @@ impl IdeaAgentWindow {
             .bg(cx.theme().colors().border)
             .child(
                 div()
-                    .id("idea-agent-divider")
+                    .id("plus-agent-divider")
                     .absolute()
                     .left(px(-DIVIDER_HANDLE_WIDTH / 2.))
                     .w(px(DIVIDER_HANDLE_WIDTH))
@@ -373,7 +372,7 @@ impl IdeaAgentWindow {
     }
 }
 
-impl Render for IdeaAgentWindow {
+impl Render for PlusAgentWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let threads = self.threads.clone();
         let panel = div().flex_1().min_w_0().h_full().child(self.panel.clone());
@@ -401,7 +400,7 @@ impl Render for IdeaAgentWindow {
     }
 }
 
-impl Focusable for IdeaAgentWindow {
+impl Focusable for PlusAgentWindow {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.panel.focus_handle(cx)
     }

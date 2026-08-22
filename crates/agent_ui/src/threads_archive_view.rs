@@ -156,7 +156,7 @@ pub struct ThreadsArchiveView {
     archived_branch_names: HashMap<ThreadId, HashMap<PathBuf, String>>,
     _load_branch_names_task: Task<()>,
     thread_filter: ThreadFilter,
-    // idea-zed: stops this header reserving room for window chrome the agent window draws itself.
+    // zed-plus: stops this header reserving room for window chrome the agent window draws itself.
     hosted: bool,
 }
 
@@ -240,7 +240,7 @@ impl ThreadsArchiveView {
         this
     }
 
-    // idea-zed: set when the sidebar showing this is itself hosted by the agent window.
+    // zed-plus: set when the sidebar showing this is itself hosted by the agent window.
     pub fn set_hosted(&mut self, hosted: bool) {
         self.hosted = hosted;
     }
@@ -865,7 +865,7 @@ impl ThreadsArchiveView {
             settings::SidebarSide::Left
         );
         let sidebar_on_right = !sidebar_on_left;
-        // idea-zed: `!self.hosted` — see the same block in `Sidebar::render_sidebar_header`.
+        // zed-plus: `!self.hosted` — see the same block in `Sidebar::render_sidebar_header`.
         let owns_window_chrome = !window.is_fullscreen() && !self.hosted;
         let traffic_lights = cfg!(target_os = "macos") && owns_window_chrome && sidebar_on_left;
         let left_window_controls =
