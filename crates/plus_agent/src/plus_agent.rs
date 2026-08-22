@@ -45,10 +45,6 @@ const DEFAULT_WINDOW_SIZE: gpui::Size<Pixels> = gpui::Size {
 /// window itself would have indented everything they draw.
 const TRAFFIC_LIGHT_INSET: Pixels = px(76.);
 
-/// Bumped on every change, and shown in the header so a running build can be identified while
-/// iterating. Remove before this is considered finished.
-const VERSION: &str = "0.2.p14";
-
 /// Where the threads list sits relative to the conversation.
 #[derive(PartialEq, Clone, Copy)]
 enum ThreadsSide {
@@ -291,12 +287,7 @@ impl PlusAgentWindow {
             .bg(cx.theme().colors().title_bar_background)
             .pl(TRAFFIC_LIGHT_INSET)
             .pr_2()
-            .justify_between()
-            .child(
-                Label::new(VERSION)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
-            )
+            .justify_end()
             .child(
                 h_flex()
                     .gap_px()

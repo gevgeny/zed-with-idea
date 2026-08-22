@@ -1513,6 +1513,10 @@ fn initialize_pane(
     });
 }
 
+// zed-plus: bump when the fork's own features change. Upstream's version tracks Zed, and says
+// nothing about which of these are in a given build.
+const ZED_PLUS_VERSION: &str = "0.3.0";
+
 fn open_about_window(cx: &mut App) {
     fn about_window_icon(release_channel: ReleaseChannel) -> Arc<Image> {
         let bytes = match release_channel {
@@ -1611,6 +1615,13 @@ fn open_about_window(cx: &mut App) {
                             .items_center()
                             .child(img(self.app_icon.clone()).size_16().flex_none())
                             .child(Headline::new(self.message.clone()))
+                            // zed-plus: which build of the fork this is, since the version
+                            // below it only ever describes upstream Zed.
+                            .child(
+                                Label::new(format!("Zed Plus {ZED_PLUS_VERSION}"))
+                                    .color(Color::Muted)
+                                    .size(LabelSize::Small),
+                            )
                             .when_some(self.commit.clone(), |this, commit| {
                                 this.child(
                                     Label::new("Commit")

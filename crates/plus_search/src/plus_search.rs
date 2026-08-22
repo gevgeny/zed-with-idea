@@ -124,10 +124,6 @@ fn path_matcher(text: &str, path_style: PathStyle) -> PathMatcher {
     PathMatcher::new(patterns, path_style).unwrap_or_default()
 }
 
-/// Bumped on every change, and shown at the trailing edge of the query input so a running build
-/// can be identified while iterating. Remove before this is considered finished.
-const VERSION: &str = "0.2.p35";
-
 /// Wider than a plain picker: rows carry a line of source plus its location, and the preview
 /// pane shares the width.
 const MODAL_WIDTH: Rems = Rems(48.);
@@ -1036,13 +1032,7 @@ impl PickerDelegate for PlusSearchDelegate {
                 .px_2()
                 .py_1()
                 .gap_2()
-                .justify_between()
                 .child(div().flex_1().min_w_0().truncate().children(location))
-                .child(
-                    Label::new(VERSION)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted),
-                )
                 .into_any_element(),
         )
     }
