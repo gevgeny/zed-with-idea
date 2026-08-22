@@ -952,11 +952,12 @@ impl Sidebar {
         self.hosted = hosted;
     }
 
-    fn panel_reveal(&self) -> PanelReveal {
+    /// What to do with the panel's dock, given what a sidebar in its own window would do.
+    fn panel_reveal(&self, unhosted: PanelReveal) -> PanelReveal {
         if self.hosted {
             PanelReveal::Leave
         } else {
-            PanelReveal::Focus
+            unhosted
         }
     }
 
@@ -3629,6 +3630,23 @@ impl Sidebar {
         })
     }
 
+    fn apply_panel_reveal(
+        workspace: &mut Workspace,
+        reveal: PanelReveal,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        match reveal {
+            PanelReveal::Focus => {
+                workspace.focus_panel::<AgentPanel>(window, cx);
+            }
+            PanelReveal::Reveal => {
+                workspace.reveal_panel::<AgentPanel>(window, cx);
+            }
+            PanelReveal::Leave => {}
+        }
+    }
+
     fn load_agent_thread_in_workspace(
         workspace: &Entity<Workspace>,
         metadata: &ThreadMetadata,
@@ -3664,14 +3682,8 @@ impl Sidebar {
 
         if let Some(agent_panel) = existing_panel {
             load_thread(agent_panel, metadata, reveal == PanelReveal::Focus, window, cx);
-            workspace.update(cx, |workspace, cx| match reveal {
-                PanelReveal::Focus => {
-                    workspace.focus_panel::<AgentPanel>(window, cx);
-                }
-                PanelReveal::Reveal => {
-                    workspace.reveal_panel::<AgentPanel>(window, cx);
-                }
-                PanelReveal::Leave => {}
+            workspace.update(cx, |workspace, cx| {
+                Self::apply_panel_reveal(workspace, reveal, window, cx)
             });
             return;
         }
@@ -3688,15 +3700,7 @@ impl Sidebar {
                     panel.clone()
                 });
                 load_thread(panel, &metadata, reveal == PanelReveal::Focus, window, cx);
-                match reveal {
-                    PanelReveal::Focus => {
-                        workspace.focus_panel::<AgentPanel>(window, cx);
-                    }
-                    PanelReveal::Reveal => {
-                        workspace.reveal_panel::<AgentPanel>(window, cx);
-                    }
-                    PanelReveal::Leave => {}
-                }
+                Self::apply_panel_reveal(workspace, reveal, window, cx);
             })?;
 
             anyhow::Ok(())
@@ -3920,7 +3924,13 @@ impl Sidebar {
             }
         });
 
-        Self::load_agent_thread_in_workspace(workspace, metadata, self.panel_reveal(), window, cx);
+        Self::load_agent_thread_in_workspace(
+            workspace,
+            metadata,
+            self.panel_reveal(PanelReveal::Focus),
+            window,
+            cx,
+        );
 
         self.update_entries(cx);
     }
@@ -4496,7 +4506,7 @@ impl Sidebar {
                 Self::load_agent_thread_in_workspace(
                     &workspace,
                     metadata,
-                    self.panel_reveal(),
+                    self.panel_reveal(PanelReveal::Focus),
                     window,
                     cx,
                 );
@@ -5951,11 +5961,7 @@ impl Sidebar {
                 Self::load_agent_thread_in_workspace(
                     workspace,
                     metadata,
-                    if self.hosted {
-                        PanelReveal::Leave
-                    } else {
-                        PanelReveal::Reveal
-                    },
+                    self.panel_reveal(PanelReveal::Reveal),
                     window,
                     cx,
                 );
@@ -6009,7 +6015,7 @@ impl Sidebar {
                 Self::load_agent_thread_in_workspace(
                     workspace,
                     metadata,
-                    self.panel_reveal(),
+                    self.panel_reveal(PanelReveal::Focus),
                     window,
                     cx,
                 );
@@ -6106,11 +6112,7 @@ impl Sidebar {
                                 Self::load_agent_thread_in_workspace(
                                     original_ws,
                                     metadata,
-                                    if this.hosted {
-                                        PanelReveal::Leave
-                                    } else {
-                                        PanelReveal::Reveal
-                                    },
+                                    this.panel_reveal(PanelReveal::Reveal),
                                     window,
                                     cx,
                                 );

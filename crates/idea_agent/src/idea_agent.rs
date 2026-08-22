@@ -101,12 +101,10 @@ fn register(workspace: &mut Workspace, _window: Option<&mut Window>, _: &mut Con
         // Only worth closing when the conversation is what that dock is currently showing. Panels
         // share a dock, so closing it whenever the window opens would take down whatever else the
         // user had there — the git panel, say — which has nothing to do with this window.
-        let dock = dock
-            .read(cx)
-            .active_panel_index()
-            .zip(dock.read(cx).panel_index_for_type::<AgentPanel>())
-            .is_some_and(|(active, agent)| active == agent)
-            .then(|| dock.downgrade());
+        let panels = dock.read(cx);
+        let showing_agent =
+            panels.active_panel_index() == panels.panel_index_for_type::<AgentPanel>();
+        let dock = showing_agent.then(|| dock.downgrade());
         toggle_window(multi_workspace, panel, dock, window, cx);
     });
 }
@@ -288,10 +286,8 @@ impl IdeaAgentWindow {
             .flex_none()
             .w_full()
             // The same height the editor window's title bar computes for itself, so the two line
-            // up when the windows sit side by side.
-            // Borders are drawn inside the height, so a `border_b_1` here would leave the
-            // coloured band a pixel shorter than the editor window's title bar. The seam is a
-            // sibling below instead.
+            // up when the windows sit side by side. The seam below is a sibling rather than a
+            // border, which would be drawn inside this height and leave the band a pixel short.
             .h(platform_title_bar_height(window))
             .bg(cx.theme().colors().title_bar_background)
             .pl(TRAFFIC_LIGHT_INSET)
